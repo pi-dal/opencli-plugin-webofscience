@@ -1,0 +1,6 @@
+{
+  "name": "webofscience",
+  "version": "0.1.0",
+  "opencli": ">=1.5.2",
+  "description": "Web of Science browser adapter for opencli"
+}

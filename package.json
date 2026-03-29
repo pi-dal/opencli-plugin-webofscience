@@ -1,0 +1,23 @@
+{
+  "name": "opencli-plugin-webofscience",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web of Science browser adapter for opencli",
+  "scripts": {
+    "build:plugin": "node ./scripts/build-plugin.mjs",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@jackwener/opencli": ">=1.5.2"
+  },
+  "devDependencies": {
+    "@jackwener/opencli": "^1.5.2",
+    "@types/node": "^24.5.2",
+    "esbuild": "^0.25.9",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.1"
+  }
+}

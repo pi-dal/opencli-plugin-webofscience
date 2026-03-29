@@ -1,0 +1,73 @@
+import { cli, Strategy } from '@jackwener/opencli/registry';
+import { ArgumentError, EmptyResultError } from './src/lib/errors';
+import {
+  buildSearchPayload,
+  clampLimit,
+  ensureSearchSession,
+  extractRecords,
+  firstTitle,
+  formatAuthors,
+  fullRecordUrl,
+  normalizeDatabase,
+  smartSearchUrl,
+} from './src/lib/shared';
+
+cli({
+  site: 'webofscience',
+  name: 'smart-search',
+  description: 'Search Web of Science via the Smart Search page',
+  domain: 'webofscience.clarivate.cn',
+  strategy: Strategy.UI,
+  browser: true,
+  navigateBefore: false,
+  args: [
+    { name: 'query', positional: true, required: true, help: 'Natural-language or fielded query, e.g. machine learning or TS=(machine learning)' },
+    { name: 'database', required: false, help: 'Database to search. Defaults to woscc.', choices: ['woscc', 'alldb'] },
+    { name: 'limit', type: 'int', default: 10, help: 'Max results (max 50)' },
+  ],
+  columns: ['rank', 'title', 'authors', 'year', 'source', 'citations', 'doi', 'url'],
+  func: async (page, kwargs) => {
+    const query = String(kwargs.query ?? '').trim();
+    if (!query) {
+      throw new ArgumentError('Search query is required');
+    }
+
+    const database = normalizeDatabase(kwargs.database);
+    const limit = clampLimit(kwargs.limit);
+    const sid = await ensureSearchSession(page, database, query);
+    const payload = buildSearchPayload(query, limit, database);
+
+    const events = await page.evaluate(`(async () => {
+      const payload = ${JSON.stringify(payload)};
+      const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return res.json();
+    })()`);
+
+    const records = extractRecords(events)
+      .slice(0, limit)
+      .map((record, index) => ({
+        rank: index + 1,
+        title: firstTitle(record, 'item'),
+        authors: formatAuthors(record),
+        year: record.pub_info?.pubyear ?? '',
+        source: firstTitle(record, 'source'),
+        citations: record.citation_related?.counts?.WOSCC ?? 0,
+        doi: record.doi ?? '',
+        url: record.ut ? fullRecordUrl(database, record.ut) : '',
+      }))
+      .filter(record => record.title);
+
+    if (!records.length) {
+      throw new EmptyResultError('webofscience smart-search', 'Try a different keyword or verify your Web of Science access in Chrome');
+    }
+
+    return records;
+  },
+});
+
+export { smartSearchUrl };
