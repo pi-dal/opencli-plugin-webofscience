@@ -71,7 +71,13 @@ cli({
     const database = normalizeDatabase(kwargs.database);
     const limit = clampLimit(kwargs.limit);
     const field = normalizeBasicSearchField(kwargs.field);
-    const sid = await ensureSearchSessionAtUrl(page, basicSearchUrl(database), query, BASIC_SEARCH_INPUT_SELECTOR);
+    const sid = await ensureSearchSessionAtUrl(
+      page,
+      basicSearchUrl(database),
+      query,
+      BASIC_SEARCH_INPUT_SELECTOR,
+      { requireSummaryPage: true },
+    );
     const payload = buildSearchPayload(query, limit, database, buildBasicSearchRowText(query, field.key));
 
     const events = await page.evaluate(`(async () => {

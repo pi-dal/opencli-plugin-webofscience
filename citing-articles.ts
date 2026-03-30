@@ -1,11 +1,12 @@
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, EmptyResultError } from './src/lib/errors';
 import {
+  basicSearchUrl,
   buildExactQuery,
   buildSearchPayload,
   citingSummaryUrl,
   clampLimit,
-  ensureSearchSession,
+  ensureSearchSessionAtUrl,
   extractRecords,
   fetchCurrentSummaryStreamRecords,
   findMatchingRecord,
@@ -34,9 +35,16 @@ async function resolveUt(
   }
   if (identifier.kind === 'ut') return identifier.value;
 
-  const sid = await ensureSearchSession(page, database, rawId);
+  const exactQuery = buildExactQuery(identifier);
+  const sid = await ensureSearchSessionAtUrl(
+    page,
+    basicSearchUrl(database),
+    exactQuery,
+    '#search-option-0',
+    { requireSummaryPage: true },
+  );
   const events = await page.evaluate(`(async () => {
-    const payload = ${JSON.stringify(buildSearchPayload(rawId, 5, database, buildExactQuery(identifier)))};
+    const payload = ${JSON.stringify(buildSearchPayload(rawId, 5, database, exactQuery))};
     const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
       method: 'POST',
       credentials: 'include',

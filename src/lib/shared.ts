@@ -256,7 +256,7 @@ export async function ensureSearchSession(
   database: WosDatabase,
   query: string,
 ): Promise<string> {
-  return ensureSearchSessionAtUrl(page, smartSearchUrl(database), query, SEARCH_INPUT_SELECTOR);
+  return ensureSearchSessionAtUrl(page, smartSearchUrl(database), query, SEARCH_INPUT_SELECTOR, { requireSummaryPage: true });
 }
 
 export async function ensureSearchSessionAtUrl(
@@ -271,7 +271,27 @@ export async function ensureSearchSessionAtUrl(
   url: string,
   query: string,
   preferredSelector?: string,
+  options: { requireSummaryPage?: boolean } = {},
 ): Promise<string> {
+  const requireSummaryPage = options.requireSummaryPage === true;
+
+  const isSummaryHref = (href?: string | null): boolean => {
+    return typeof href === 'string' && /\/summary\//.test(href);
+  };
+
+  const isReady = (session?: { sid?: string | null; href?: string }): boolean => {
+    return Boolean(session?.sid) && (!requireSummaryPage || isSummaryHref(session?.href));
+  };
+
+  const waitForReadySession = async (initialSession?: { sid?: string | null; href?: string }) => {
+    let session = initialSession ?? await extractSessionState(page);
+    for (let attempt = 0; attempt < 3 && !isReady(session); attempt++) {
+      await page.wait(4);
+      session = await extractSessionState(page);
+    }
+    return session;
+  };
+
   await page.goto(url, { settleMs: 4000 });
   await page.wait(2);
   await typeIntoSearch(page, query, preferredSelector);
@@ -279,14 +299,20 @@ export async function ensureSearchSessionAtUrl(
   await submitSearch(page);
   await page.wait(6);
 
-  let session = await extractSessionState(page);
-  if (!session?.sid) {
+  let session = await waitForReadySession();
+  if (!isReady(session)) {
     await submitSearch(page);
     await page.wait(10);
-    session = await extractSessionState(page);
+    session = await waitForReadySession();
   }
 
-  if (!session?.sid) {
+  if (!isReady(session)) {
+    if (requireSummaryPage && session?.sid) {
+      throw new CommandExecutionError(
+        'Web of Science requested passive verification before search results could be fetched',
+        'Try again in Chrome after the verification completes.',
+      );
+    }
     throw new CommandExecutionError(
       'Web of Science search session was not established',
       'The page may still be waiting for passive verification. Try again in Chrome.',
@@ -845,15 +871,34 @@ export async function fetchCurrentSummaryStreamRecords(
   await page.wait(6);
 
   let first = await fetchOnce();
-  let records = extractRecords(parseWosEventStream(String(first?.streamText || '')));
+  let records: WosRecord[] = [];
+  let firstError: unknown;
+  try {
+    records = extractRecords(parseWosEventStream(String(first?.streamText || '')));
+  } catch (error) {
+    firstError = error;
+  }
   if (!records.length) {
-    await page.wait(4);
+    await page.wait(firstError ? 8 : 4);
     const second = await fetchOnce();
-    records = extractRecords(parseWosEventStream(String(second?.streamText || '')));
+    try {
+      records = extractRecords(parseWosEventStream(String(second?.streamText || '')));
+    } catch (error) {
+      if (process.env.OPENCLI_WOS_DEBUG_SUMMARY === '1') {
+        throw new CommandExecutionError(`Web of Science summary stream returned an error: ${JSON.stringify({
+          first: first?.debug || {},
+          second: second?.debug || {},
+          firstError: firstError instanceof Error ? firstError.message : String(firstError || ''),
+          secondError: error instanceof Error ? error.message : String(error || ''),
+        })}`);
+      }
+      throw error;
+    }
     if (!records.length && process.env.OPENCLI_WOS_DEBUG_SUMMARY === '1') {
       throw new CommandExecutionError(`Web of Science summary stream returned no records: ${JSON.stringify({
         first: first?.debug || {},
         second: second?.debug || {},
+        firstError: firstError instanceof Error ? firstError.message : String(firstError || ''),
       })}`);
     }
   }
