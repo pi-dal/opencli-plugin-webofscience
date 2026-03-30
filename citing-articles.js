@@ -19,7 +19,6 @@ var CommandExecutionError = class extends PluginError {
 };
 
 // src/lib/shared.ts
-var SEARCH_INPUT_SELECTOR = "#composeQuerySmartSearch";
 var SUBMIT_BUTTON_SELECTOR = "button[aria-label='Submit your question']";
 var MAX_LIMIT = 50;
 function clampLimit(value) {
@@ -36,8 +35,8 @@ function normalizeDatabase(value, fallback = "woscc") {
 function toProduct(database) {
   return database === "alldb" ? "ALLDB" : "WOSCC";
 }
-function smartSearchUrl(database) {
-  return `https://webofscience.clarivate.cn/wos/${database}/smart-search`;
+function basicSearchUrl(database) {
+  return `https://webofscience.clarivate.cn/wos/${database}/basic-search`;
 }
 function fullRecordUrl(database, ut) {
   return `https://webofscience.clarivate.cn/wos/${database}/full-record/${ut}`;
@@ -97,23 +96,41 @@ function extractSessionState(page) {
     return { sid, href: location.href };
   })()`);
 }
-async function ensureSearchSession(page, database, query) {
-  return ensureSearchSessionAtUrl(page, smartSearchUrl(database), query, SEARCH_INPUT_SELECTOR);
-}
-async function ensureSearchSessionAtUrl(page, url, query, preferredSelector) {
+async function ensureSearchSessionAtUrl(page, url, query, preferredSelector, options = {}) {
+  const requireSummaryPage = options.requireSummaryPage === true;
+  const isSummaryHref = (href) => {
+    return typeof href === "string" && /\/summary\//.test(href);
+  };
+  const isReady = (session2) => {
+    return Boolean(session2?.sid) && (!requireSummaryPage || isSummaryHref(session2?.href));
+  };
+  const waitForReadySession = async (initialSession) => {
+    let session2 = initialSession ?? await extractSessionState(page);
+    for (let attempt = 0; attempt < 3 && !isReady(session2); attempt++) {
+      await page.wait(4);
+      session2 = await extractSessionState(page);
+    }
+    return session2;
+  };
   await page.goto(url, { settleMs: 4e3 });
   await page.wait(2);
   await typeIntoSearch(page, query, preferredSelector);
   await page.wait(1);
   await submitSearch(page);
   await page.wait(6);
-  let session = await extractSessionState(page);
-  if (!session?.sid) {
+  let session = await waitForReadySession();
+  if (!isReady(session)) {
     await submitSearch(page);
     await page.wait(10);
-    session = await extractSessionState(page);
+    session = await waitForReadySession();
   }
-  if (!session?.sid) {
+  if (!isReady(session)) {
+    if (requireSummaryPage && session?.sid) {
+      throw new CommandExecutionError(
+        "Web of Science requested passive verification before search results could be fetched",
+        "Try again in Chrome after the verification completes."
+      );
+    }
     throw new CommandExecutionError(
       "Web of Science search session was not established",
       "The page may still be waiting for passive verification. Try again in Chrome."
@@ -394,15 +411,34 @@ async function fetchCurrentSummaryStreamRecords(page, database, limit, defaultMo
   }
   await page.wait(6);
   let first = await fetchOnce();
-  let records = extractRecords(parseWosEventStream(String(first?.streamText || "")));
+  let records = [];
+  let firstError;
+  try {
+    records = extractRecords(parseWosEventStream(String(first?.streamText || "")));
+  } catch (error) {
+    firstError = error;
+  }
   if (!records.length) {
-    await page.wait(4);
+    await page.wait(firstError ? 8 : 4);
     const second = await fetchOnce();
-    records = extractRecords(parseWosEventStream(String(second?.streamText || "")));
+    try {
+      records = extractRecords(parseWosEventStream(String(second?.streamText || "")));
+    } catch (error) {
+      if (process.env.OPENCLI_WOS_DEBUG_SUMMARY === "1") {
+        throw new CommandExecutionError(`Web of Science summary stream returned an error: ${JSON.stringify({
+          first: first?.debug || {},
+          second: second?.debug || {},
+          firstError: firstError instanceof Error ? firstError.message : String(firstError || ""),
+          secondError: error instanceof Error ? error.message : String(error || "")
+        })}`);
+      }
+      throw error;
+    }
     if (!records.length && process.env.OPENCLI_WOS_DEBUG_SUMMARY === "1") {
       throw new CommandExecutionError(`Web of Science summary stream returned no records: ${JSON.stringify({
         first: first?.debug || {},
-        second: second?.debug || {}
+        second: second?.debug || {},
+        firstError: firstError instanceof Error ? firstError.message : String(firstError || "")
       })}`);
     }
   }
@@ -416,9 +452,16 @@ async function resolveUt(page, rawId, database) {
     throw new ArgumentError("Record identifier must be a Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046");
   }
   if (identifier.kind === "ut") return identifier.value;
-  const sid = await ensureSearchSession(page, database, rawId);
+  const exactQuery = buildExactQuery(identifier);
+  const sid = await ensureSearchSessionAtUrl(
+    page,
+    basicSearchUrl(database),
+    exactQuery,
+    "#search-option-0",
+    { requireSummaryPage: true }
+  );
   const events = await page.evaluate(`(async () => {
-    const payload = ${JSON.stringify(buildSearchPayload(rawId, 5, database, buildExactQuery(identifier)))};
+    const payload = ${JSON.stringify(buildSearchPayload(rawId, 5, database, exactQuery))};
     const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
       method: 'POST',
       credentials: 'include',

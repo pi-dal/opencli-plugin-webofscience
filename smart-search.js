@@ -95,22 +95,43 @@ function extractSessionState(page) {
   })()`);
 }
 async function ensureSearchSession(page, database, query) {
-  return ensureSearchSessionAtUrl(page, smartSearchUrl(database), query, SEARCH_INPUT_SELECTOR);
+  return ensureSearchSessionAtUrl(page, smartSearchUrl(database), query, SEARCH_INPUT_SELECTOR, { requireSummaryPage: true });
 }
-async function ensureSearchSessionAtUrl(page, url, query, preferredSelector) {
+async function ensureSearchSessionAtUrl(page, url, query, preferredSelector, options = {}) {
+  const requireSummaryPage = options.requireSummaryPage === true;
+  const isSummaryHref = (href) => {
+    return typeof href === "string" && /\/summary\//.test(href);
+  };
+  const isReady = (session2) => {
+    return Boolean(session2?.sid) && (!requireSummaryPage || isSummaryHref(session2?.href));
+  };
+  const waitForReadySession = async (initialSession) => {
+    let session2 = initialSession ?? await extractSessionState(page);
+    for (let attempt = 0; attempt < 3 && !isReady(session2); attempt++) {
+      await page.wait(4);
+      session2 = await extractSessionState(page);
+    }
+    return session2;
+  };
   await page.goto(url, { settleMs: 4e3 });
   await page.wait(2);
   await typeIntoSearch(page, query, preferredSelector);
   await page.wait(1);
   await submitSearch(page);
   await page.wait(6);
-  let session = await extractSessionState(page);
-  if (!session?.sid) {
+  let session = await waitForReadySession();
+  if (!isReady(session)) {
     await submitSearch(page);
     await page.wait(10);
-    session = await extractSessionState(page);
+    session = await waitForReadySession();
   }
-  if (!session?.sid) {
+  if (!isReady(session)) {
+    if (requireSummaryPage && session?.sid) {
+      throw new CommandExecutionError(
+        "Web of Science requested passive verification before search results could be fetched",
+        "Try again in Chrome after the verification completes."
+      );
+    }
     throw new CommandExecutionError(
       "Web of Science search session was not established",
       "The page may still be waiting for passive verification. Try again in Chrome."

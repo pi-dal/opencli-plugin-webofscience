@@ -19,7 +19,6 @@ var CommandExecutionError = class extends PluginError {
 };
 
 // src/lib/shared.ts
-var SEARCH_INPUT_SELECTOR = "#composeQuerySmartSearch";
 var SUBMIT_BUTTON_SELECTOR = "button[aria-label='Submit your question']";
 function normalizeDatabase(value, fallback = "woscc") {
   if (value == null || value === "") return fallback;
@@ -30,8 +29,8 @@ function normalizeDatabase(value, fallback = "woscc") {
 function toProduct(database) {
   return database === "alldb" ? "ALLDB" : "WOSCC";
 }
-function smartSearchUrl(database) {
-  return `https://webofscience.clarivate.cn/wos/${database}/smart-search`;
+function basicSearchUrl(database) {
+  return `https://webofscience.clarivate.cn/wos/${database}/basic-search`;
 }
 function fullRecordUrl(database, ut) {
   return `https://webofscience.clarivate.cn/wos/${database}/full-record/${ut}`;
@@ -88,23 +87,41 @@ function extractSessionState(page) {
     return { sid, href: location.href };
   })()`);
 }
-async function ensureSearchSession(page, database, query) {
-  return ensureSearchSessionAtUrl(page, smartSearchUrl(database), query, SEARCH_INPUT_SELECTOR);
-}
-async function ensureSearchSessionAtUrl(page, url, query, preferredSelector) {
+async function ensureSearchSessionAtUrl(page, url, query, preferredSelector, options = {}) {
+  const requireSummaryPage = options.requireSummaryPage === true;
+  const isSummaryHref = (href) => {
+    return typeof href === "string" && /\/summary\//.test(href);
+  };
+  const isReady = (session2) => {
+    return Boolean(session2?.sid) && (!requireSummaryPage || isSummaryHref(session2?.href));
+  };
+  const waitForReadySession = async (initialSession) => {
+    let session2 = initialSession ?? await extractSessionState(page);
+    for (let attempt = 0; attempt < 3 && !isReady(session2); attempt++) {
+      await page.wait(4);
+      session2 = await extractSessionState(page);
+    }
+    return session2;
+  };
   await page.goto(url, { settleMs: 4e3 });
   await page.wait(2);
   await typeIntoSearch(page, query, preferredSelector);
   await page.wait(1);
   await submitSearch(page);
   await page.wait(6);
-  let session = await extractSessionState(page);
-  if (!session?.sid) {
+  let session = await waitForReadySession();
+  if (!isReady(session)) {
     await submitSearch(page);
     await page.wait(10);
-    session = await extractSessionState(page);
+    session = await waitForReadySession();
   }
-  if (!session?.sid) {
+  if (!isReady(session)) {
+    if (requireSummaryPage && session?.sid) {
+      throw new CommandExecutionError(
+        "Web of Science requested passive verification before search results could be fetched",
+        "Try again in Chrome after the verification completes."
+      );
+    }
     throw new CommandExecutionError(
       "Web of Science search session was not established",
       "The page may still be waiting for passive verification. Try again in Chrome."
@@ -262,12 +279,12 @@ function parseRecordIdentifier(input) {
       const doi = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
       return doi ? { kind: "doi", value: doi } : null;
     }
-    const match = url.pathname.match(/\/wos\/(woscc|alldb)\/full-record\/([^/?#]+)/i);
-    if (match) {
+    const match2 = url.pathname.match(/\/wos\/(woscc|alldb)\/full-record\/([^/?#]+)/i);
+    if (match2) {
       return {
         kind: "ut",
-        value: decodeURIComponent(match[2]),
-        database: normalizeDatabase(match[1])
+        value: decodeURIComponent(match2[2]),
+        database: normalizeDatabase(match2[1])
       };
     }
   } catch {
@@ -427,13 +444,16 @@ function stripTrailingMetadataLabels(value) {
   const normalized = normalizeTextValue(value);
   if (!normalized) return "";
   const trailingLabelPattern = /\s(?:Language|Accession Number|PubMed ID|ISSN|IDS Number)\b/i;
-  const match = normalized.match(trailingLabelPattern);
-  return match?.index != null ? normalized.slice(0, match.index).trim() : normalized;
+  const match2 = normalized.match(trailingLabelPattern);
+  return match2?.index != null ? normalized.slice(0, match2.index).trim() : normalized;
 }
 function normalizeDelimitedList(value) {
   const normalized = normalizeTextValue(value);
   if (!normalized) return "";
   return normalized.replace(/([a-z)])(?=[A-Z][a-z])/g, "$1; ").replace(/([a-z)])\s+(?=[A-Z][a-z].*?,)/g, "$1; ").replace(/;\s*;/g, "; ").trim();
+}
+function splitJoinedValues(value) {
+  return String(value || "").split(/\s*;\s*/g).map(normalizeTextValue).filter(Boolean);
 }
 function extractCategoryList(value) {
   const normalized = normalizeTextValue(value);
@@ -444,17 +464,35 @@ function extractCategoryList(value) {
   }
   return normalizeDelimitedList(normalized);
 }
+function normalizeAuthorDisplayName(value) {
+  let normalized = String(value || "").replace(/\+/g, " ");
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const decoded = decodeURIComponent(normalized);
+      if (!decoded || decoded === normalized) break;
+      normalized = decoded;
+    } catch {
+      break;
+    }
+  }
+  return normalizeTextValue(
+    normalized.replace(/\[[^\]]+\]/g, " ")
+  );
+}
+function isMetadataNoiseLine(value) {
+  return /\b(view|provided|source|arrow|journal|impact|publisher|document type|doi|abstract|keywords|published|language|accession number|research areas)\b/i.test(value);
+}
 function cleanAuthorLine(value) {
   const normalized = normalizeTextValue(value);
   if (!normalized) return null;
-  if (!/,/.test(normalized)) return null;
-  if (/\b(view|provided|source|arrow|journal|impact|publisher)\b/i.test(normalized)) return null;
-  const refs = Array.from(normalized.matchAll(/\[(\d+(?:,\d+)*)\]/g)).flatMap((match) => String(match[1] || "").split(",")).map((item) => item.trim()).filter(Boolean);
+  if (isMetadataNoiseLine(normalized)) return null;
+  const refs = Array.from(normalized.matchAll(/\[(\d+(?:,\d+)*)\]/g)).flatMap((match2) => String(match2[1] || "").split(",")).map((item) => item.trim()).filter(Boolean);
   const parenthetical = normalized.match(/\(([^()]+,[^()]+)\)/)?.[1];
   const cleaned = normalizeTextValue(
     (parenthetical || normalized).replace(/\[[^\]]+\]/g, " ").replace(/\([^()]*\)/g, parenthetical ? " " : "").replace(/\s+\d+(?:,\d+)*$/g, " ")
   );
   if (!cleaned || /\b(corresponding author)\b/i.test(cleaned)) return null;
+  if (!/,/.test(cleaned) && cleaned.split(/\s+/).length < 2) return null;
   return { name: cleaned, refs };
 }
 function extractSectionValueList(body, label, endLabels = []) {
@@ -470,18 +508,18 @@ function extractStructuredAuthors(body) {
     "E-mail Addresses",
     "Categories/ Classification"
   ])) {
-    const match = line.match(/^(\d+)\s+(.+)$/);
-    if (!match) continue;
-    addressMap.set(match[1], normalizeTextValue(match[2]));
+    const match2 = line.match(/^(\d+)\s+(.+)$/);
+    if (!match2) continue;
+    addressMap.set(match2[1], normalizeTextValue(match2[2]));
   }
   const authors = [];
   for (let index = byIndex + 1; index < lines.length; index++) {
     const line = lines[index];
     if (isSectionBoundary(line, ["Addresses", "E-mail Addresses", "Keywords", "Source", "Abstract"])) break;
-    const match = line.match(/^(.+?)(\d+(?:,\d+)*)$/);
-    if (match) {
-      const name = normalizeTextValue(match[1]);
-      const refs = match[2].split(",").map((item) => item.trim()).filter(Boolean);
+    const match2 = line.match(/^(.+?)(\d+(?:,\d+)*)$/);
+    if (match2) {
+      const name = normalizeTextValue(match2[1]);
+      const refs = match2[2].split(",").map((item) => item.trim()).filter(Boolean);
       if (!name || !refs.length) continue;
       authors.push({
         name,
@@ -500,12 +538,138 @@ function extractStructuredAuthors(body) {
   }
   return authors;
 }
+function normalizeIdsNumber(value) {
+  const normalized = normalizeTextValue(value);
+  if (!normalized) return "";
+  const trimmed = normalized.replace(/\b(?:Treatment|View record|Bibliography|Practical|Experimental)\b.*$/i, "").trim();
+  if (trimmed && trimmed !== normalized) {
+    const codeMatch2 = trimmed.match(/^[A-Z0-9-]{4,}\b/i);
+    return codeMatch2?.[0] || trimmed;
+  }
+  const codeMatch = normalized.match(/^[A-Z0-9-]{4,}\b/i);
+  if (codeMatch && normalized.split(/\s+/).length > 3) {
+    return codeMatch[0];
+  }
+  return normalized;
+}
+function extractStructuredAuthorNames(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return uniqueValues(parsed.map((item) => normalizeAuthorDisplayName(item?.name || "")).filter(Boolean));
+  } catch {
+    return [];
+  }
+}
+function extractAuthorNamesFromFullTextLinks(links) {
+  const names = [];
+  const decodeRepeatedly = (value) => {
+    const results = [value];
+    let current = value;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const decoded = decodeURIComponent(current.replace(/\+/g, "%20"));
+        if (!decoded || decoded === current) break;
+        results.push(decoded);
+        current = decoded;
+      } catch {
+        break;
+      }
+    }
+    return uniqueValues(results);
+  };
+  for (const link of links) {
+    const rawUrl = String(link.url || "").trim();
+    if (!rawUrl) continue;
+    const candidates = [...decodeRepeatedly(rawUrl)];
+    try {
+      const url = new URL(rawUrl);
+      for (const value of url.searchParams.values()) {
+        candidates.push(...decodeRepeatedly(String(value || "")));
+      }
+      const directAuthors = url.searchParams.getAll("rft.au").map(normalizeAuthorDisplayName).filter(Boolean);
+      if (directAuthors.length) {
+        names.push(...directAuthors);
+        continue;
+      }
+      const last = normalizeAuthorDisplayName(url.searchParams.get("rft.aulast") || "");
+      const first = normalizeAuthorDisplayName(url.searchParams.get("rft.aufirst") || "");
+      if (last && first) {
+        names.push(`${last}, ${first}`);
+      }
+    } catch {
+    }
+    for (const candidate of uniqueValues(candidates)) {
+      const directMatches = Array.from(
+        candidate.matchAll(/(?:^|[?&])rft\.au=([^&]+)/g),
+        (match2) => normalizeAuthorDisplayName(match2[1] || "")
+      ).filter(Boolean);
+      if (directMatches.length) {
+        names.push(...directMatches);
+        continue;
+      }
+      const first = normalizeAuthorDisplayName(candidate.match(/(?:^|[?&])rft\.aufirst=([^&]+)/)?.[1] || "");
+      const last = normalizeAuthorDisplayName(candidate.match(/(?:^|[?&])rft\.aulast=([^&]+)/)?.[1] || "");
+      if (first && last) {
+        names.push(`${last}, ${first}`);
+      }
+    }
+  }
+  return uniqueValues(names);
+}
+function pickBestAuthors(primaryAuthors, structuredAuthorsValue, fullTextLinks) {
+  const primary = uniqueValues(splitJoinedValues(primaryAuthors).map(normalizeAuthorDisplayName));
+  if (primary.length > 1) {
+    return primary.join("; ");
+  }
+  const structured = extractStructuredAuthorNames(structuredAuthorsValue);
+  if (structured.length > primary.length) {
+    return structured.join("; ");
+  }
+  const linked = extractAuthorNamesFromFullTextLinks(fullTextLinks);
+  if (linked.length > primary.length) {
+    return linked.join("; ");
+  }
+  return primary.join("; ");
+}
+function expandStructuredAuthors(structuredAuthorsValue, fallbackAuthorNames) {
+  const fallback = uniqueValues(fallbackAuthorNames.map(normalizeAuthorDisplayName).filter(Boolean));
+  if (!structuredAuthorsValue) {
+    return fallback.length ? JSON.stringify(fallback.map((name) => ({ name, address_refs: [], addresses: [] }))) : "";
+  }
+  try {
+    const parsed = JSON.parse(structuredAuthorsValue);
+    const existingNames = new Set(parsed.map((item) => normalizeAuthorDisplayName(item.name || "")).filter(Boolean));
+    const expanded = [...parsed];
+    for (const name of fallback) {
+      if (existingNames.has(name)) continue;
+      expanded.push({ name, address_refs: [], addresses: [] });
+    }
+    return JSON.stringify(expanded);
+  } catch {
+    return structuredAuthorsValue;
+  }
+}
+function sanitizeFullTextLinks(links) {
+  const unique = uniqueValues(
+    links.map((link) => String(link.url || "").trim()).filter(Boolean)
+  );
+  if (unique.length > 8) {
+    return [];
+  }
+  const seen = /* @__PURE__ */ new Set();
+  return links.filter((link) => {
+    const url = String(link.url || "").trim();
+    if (!url || seen.has(url)) return false;
+    seen.add(url);
+    return true;
+  });
+}
 function extractSupplementMetadataFromText(body) {
   const text = String(body || "").replace(/\u00a0/g, " ");
   const metadata = {};
   const extract = (pattern) => normalizeTextValue(text.match(pattern)?.[1] || "");
   const regexFields = {
-    document_type: /Document Type\s+(.+?)\s+Abstract/s,
     article_number: /Article Number\s+(.+?)\s+Published/s,
     published: /Published\s+(.+?)\s+(?:Early Access|Indexed)/s,
     early_access: /Early Access\s+(.+?)\s+Indexed/s,
@@ -520,6 +684,17 @@ function extractSupplementMetadataFromText(body) {
     const value = extract(pattern);
     if (value) metadata[key] = value;
   }
+  const documentType = extractInlineOrSectionValue(text, "Document Type", [
+    "DOI",
+    "Abstract",
+    "Article Number",
+    "Published",
+    "Early Access",
+    "Indexed",
+    "Keywords",
+    "Source"
+  ]).replace(/\bJump to\b.*$/i, "").replace(/\barrow[_ ]\w+\b/ig, "").replace(/\bEnriched Cited References\b.*$/i, "").replace(/\s+/g, " ").trim();
+  if (documentType) metadata.document_type = documentType;
   const fallbackFields = [
     ["language", "Language", ["Accession Number", "PubMed ID", "ISSN"]],
     ["pubmed_id", "PubMed ID", ["ISSN", "IDS Number", "Journal information"]],
@@ -547,12 +722,14 @@ function extractSupplementMetadataFromText(body) {
   ]);
   const authorAddresses = uniqueValues(addressSection).join("; ");
   if (authorAddresses) metadata.author_addresses = authorAddresses;
-  const emails = uniqueValues(Array.from(text.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi), (match) => match[0]));
+  const emails = uniqueValues(Array.from(text.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi), (match2) => match2[0]));
   if (emails.length) metadata.email_addresses = emails.join("; ");
   const researchAreas = extractInlineOrSectionValue(text, "Research Areas", [
     "Citation Topics",
     "Web of Science Categories",
-    "Journal information"
+    "Journal information",
+    "Language",
+    "Accession Number"
   ]);
   if (researchAreas) metadata.research_areas = researchAreas;
   const wosCategories = extractCategoryList(stripTrailingMetadataLabels(extractInlineOrSectionValue(text, "Web of Science Categories", [
@@ -571,7 +748,10 @@ function extractSupplementMetadataFromText(body) {
   const keywordsPlus = extractSectionValueList(text, "Keywords Plus", [
     "Author Information",
     "Corresponding Address",
-    "Addresses"
+    "Addresses",
+    "Published",
+    "Language",
+    "Research Areas"
   ]).join("; ");
   if (keywordsPlus) metadata.keywords_plus = keywordsPlus;
   const authorsStructured = extractStructuredAuthors(text);
@@ -593,6 +773,12 @@ function extractSupplementMetadataFromText(body) {
   if (metadata.current_publisher) {
     metadata.current_publisher = metadata.current_publisher.replace(/;\s*;/g, "; ").replace(/\s+/g, " ").trim();
   }
+  if (metadata.research_areas) {
+    metadata.research_areas = normalizeDelimitedList(metadata.research_areas);
+  }
+  if (metadata.ids_number) {
+    metadata.ids_number = normalizeIdsNumber(metadata.ids_number);
+  }
   if (metadata.authors_structured) {
     try {
       const parsed = JSON.parse(metadata.authors_structured);
@@ -604,6 +790,108 @@ function extractSupplementMetadataFromText(body) {
     }
   }
   return metadata;
+}
+function extractRecordPageFallbackFromText(body) {
+  const text = String(body || "").replace(/\u00a0/g, " ");
+  const lines = getTextLines(text);
+  const isTitleNoise = (line) => {
+    return !line || line === "By" || line === "Source" || SECTION_LABELS.has(line) || UI_NOISE_LINES.has(line) || /^WOS\b/i.test(line) || /top header/i.test(line) || /full record/i.test(line) || /web of science/i.test(line);
+  };
+  let title = "";
+  const byIndex = lines.findIndex((line) => line === "By");
+  if (byIndex > 0) {
+    for (let index = byIndex - 1; index >= 0; index--) {
+      const line = lines[index];
+      if (!isTitleNoise(line)) {
+        title = line;
+        break;
+      }
+    }
+  }
+  if (!title) {
+    title = lines.find((line) => !isTitleNoise(line)) ?? "";
+  }
+  const authors = uniqueValues(
+    extractSectionLines(text, "By", ["Source", "Document Type", "Abstract", "Keywords", "Author Information"]).map((line) => cleanAuthorLine(line)?.name || "").filter(Boolean)
+  ).join("; ");
+  const source = extractInlineOrSectionValue(text, "Source", [
+    "Document Type",
+    "Abstract",
+    "Keywords",
+    "Journal information"
+  ]) || extractSectionLines(text, "Journal information", [
+    "Research Areas",
+    "Web of Science Categories",
+    "Journal Impact Factor"
+  ])[0] || "";
+  const doi = normalizeTextValue(text.match(/\bDOI\s+(\S+)/s)?.[1] || "");
+  const ut = normalizeTextValue(text.match(/\bAccession Number\s+(WOS:[A-Z0-9]+)/i)?.[1] || "");
+  const abstract = extractInlineOrSectionValue(text, "Abstract", [
+    "Keywords",
+    "Author Information",
+    "Corresponding Address",
+    "Document Type"
+  ]);
+  const published = extractInlineOrSectionValue(text, "Published", [
+    "Early Access",
+    "Indexed",
+    "Document Type",
+    "Language"
+  ]);
+  const year = published.match(/\b(?:19|20)\d{2}\b/)?.[0] || "";
+  return { title, authors, year, source, doi, ut, abstract };
+}
+function buildRecordRowsFromPageSupplement(supplement, recordUrl, fallbackUt) {
+  const metadata = supplement.metadata ?? {};
+  const fallback = extractRecordPageFallbackFromText(supplement.bodyText ?? "");
+  const rawFullTextLinks = supplement.fullTextLinks ?? [];
+  const fullTextLinks = sanitizeFullTextLinks(rawFullTextLinks);
+  const supplementalAuthors = extractAuthorNamesFromFullTextLinks(rawFullTextLinks);
+  const authorsStructured = expandStructuredAuthors(metadata.authors_structured ?? "", supplementalAuthors);
+  const authors = pickBestAuthors(
+    fallback.authors ?? "",
+    authorsStructured,
+    fullTextLinks
+  );
+  const hasMeaningfulFallback = Boolean(
+    fallback.title || authors || fallback.source || fallback.doi || fallback.abstract || Object.keys(metadata).length
+  );
+  if (!hasMeaningfulFallback) {
+    return [];
+  }
+  const fullTextLabels = fullTextLinks.map((link) => (link.label || "").trim()).filter(Boolean).join("; ");
+  const fullTextUrls = fullTextLinks.map((link) => (link.url || "").trim()).filter(Boolean).join("; ");
+  return [
+    { field: "title", value: fallback.title ?? "" },
+    { field: "authors", value: authors },
+    { field: "year", value: fallback.year ?? "" },
+    { field: "source", value: fallback.source ?? "" },
+    { field: "doi", value: fallback.doi ?? "" },
+    { field: "ut", value: fallback.ut || fallbackUt },
+    { field: "abstract", value: fallback.abstract ?? "" },
+    { field: "document_type", value: metadata.document_type ?? "" },
+    { field: "article_number", value: metadata.article_number ?? "" },
+    { field: "published", value: metadata.published ?? "" },
+    { field: "early_access", value: metadata.early_access ?? "" },
+    { field: "indexed", value: metadata.indexed ?? "" },
+    { field: "language", value: metadata.language ?? "" },
+    { field: "pubmed_id", value: metadata.pubmed_id ?? "" },
+    { field: "issn", value: metadata.issn ?? "" },
+    { field: "ids_number", value: metadata.ids_number ?? "" },
+    { field: "corresponding_address", value: metadata.corresponding_address ?? "" },
+    { field: "author_addresses", value: metadata.author_addresses ?? "" },
+    { field: "email_addresses", value: metadata.email_addresses ?? "" },
+    { field: "research_areas", value: metadata.research_areas ?? "" },
+    { field: "wos_categories", value: metadata.wos_categories ?? "" },
+    { field: "authors_structured", value: authorsStructured },
+    { field: "current_publisher", value: metadata.current_publisher ?? "" },
+    { field: "author_keywords", value: metadata.author_keywords ?? "" },
+    { field: "keywords_plus", value: metadata.keywords_plus ?? "" },
+    { field: "cited_references", value: metadata.cited_references ?? "" },
+    { field: "full_text_links", value: fullTextLabels },
+    { field: "full_text_urls", value: fullTextUrls },
+    { field: "url", value: recordUrl }
+  ].filter((row) => row.value !== "");
 }
 async function scrapeRecordPageSupplement(page, url) {
   await page.goto(url, { settleMs: 4e3 });
@@ -674,6 +962,7 @@ async function scrapeRecordPageSupplement(page, url) {
   const bodyText = typeof supplement.bodyText === "string" ? supplement.bodyText : "";
   const legacyMetadata = typeof supplement.metadata === "object" && supplement.metadata !== null ? supplement.metadata : void 0;
   return {
+    bodyText,
     metadata: bodyText ? extractSupplementMetadataFromText(bodyText) : legacyMetadata,
     fullTextLinks: Array.isArray(supplement.fullTextLinks) ? supplement.fullTextLinks : []
   };
@@ -706,38 +995,23 @@ cli({
       throw new ArgumentError("Record identifier must be a Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046");
     }
     const database = normalizeDatabase(kwargs.database, identifier.database ?? "woscc");
-    const sid = await ensureSearchSession(page, database, rawId);
     const exactQuery = buildExactQuery(identifier);
-    const searchPayload = buildSearchPayload(rawId, 5, database, exactQuery);
-    const searchEvents = await page.evaluate(`(async () => {
-      const payload = ${JSON.stringify(searchPayload)};
-      const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      return res.json();
-    })()`);
-    const queryId = extractQueryId(searchEvents);
-    const records = extractRecords(searchEvents);
-    const match = findMatchingRecord(records, identifier);
-    if (!queryId || !match?.record) {
-      throw new EmptyResultError("webofscience record", "Try using a Web of Science UT, DOI, or verify your Web of Science access in Chrome");
-    }
-    const product = toProduct(database);
-    const fullRecordPayload = buildFullRecordPayload({
-      qid: queryId,
-      docNumber: match.docNumber,
-      product,
-      coll: match.record.coll ?? product,
-      searchMode: "general_semantic"
-    });
-    let record = match.record;
+    const fallbackUt = identifier.kind === "ut" ? identifier.value : "";
+    let record = null;
+    let recordUrl = fallbackUt ? fullRecordUrl(database, fallbackUt) : "";
+    let searchError;
     try {
-      const fullRecordEvents = await page.evaluate(`(async () => {
-        const payload = ${JSON.stringify(fullRecordPayload)};
-        const res = await fetch('/api/wosnx/core/getFullRecordByQueryId?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
+      const sid = await ensureSearchSessionAtUrl(
+        page,
+        basicSearchUrl(database),
+        exactQuery,
+        "#search-option-0",
+        { requireSummaryPage: true }
+      );
+      const searchPayload = buildSearchPayload(rawId, 5, database, exactQuery);
+      const searchEvents = await page.evaluate(`(async () => {
+        const payload = ${JSON.stringify(searchPayload)};
+        const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
           method: 'POST',
           credentials: 'include',
           headers: { 'content-type': 'application/json' },
@@ -745,13 +1019,45 @@ cli({
         });
         return res.json();
       })()`);
-      const fullRecord = extractFullRecord(fullRecordEvents);
-      if (fullRecord) {
-        record = fullRecord;
+      const queryId = extractQueryId(searchEvents);
+      const records = extractRecords(searchEvents);
+      const match2 = findMatchingRecord(records, identifier);
+      if (!queryId || !match2?.record) {
+        throw new EmptyResultError("webofscience record", "Try using a Web of Science UT, DOI, or verify your Web of Science access in Chrome");
       }
-    } catch {
+      const product = toProduct(database);
+      const fullRecordPayload = buildFullRecordPayload({
+        qid: queryId,
+        docNumber: match2.docNumber,
+        product,
+        coll: match2.record.coll ?? product,
+        searchMode: "general_semantic"
+      });
+      record = match2.record;
+      try {
+        const fullRecordEvents = await page.evaluate(`(async () => {
+          const payload = ${JSON.stringify(fullRecordPayload)};
+          const res = await fetch('/api/wosnx/core/getFullRecordByQueryId?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          return res.json();
+        })()`);
+        const fullRecord = extractFullRecord(fullRecordEvents);
+        if (fullRecord) {
+          record = fullRecord;
+        }
+      } catch {
+      }
+      recordUrl = record.ut ? fullRecordUrl(database, record.ut) : recordUrl;
+    } catch (error) {
+      searchError = error;
+      if (identifier.kind !== "ut") {
+        throw error;
+      }
     }
-    const recordUrl = record.ut ? fullRecordUrl(database, record.ut) : "";
     let supplement = {};
     if (recordUrl) {
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -762,14 +1068,32 @@ cli({
         }
       }
     }
-    const fullTextLinks = (supplement.fullTextLinks ?? []).map((link) => (link.label || "").trim()).filter(Boolean).join("; ");
-    const fullTextUrls = (supplement.fullTextLinks ?? []).map((link) => (link.url || "").trim()).filter(Boolean).join("; ");
+    if (!record) {
+      const fallbackRows = buildRecordRowsFromPageSupplement(supplement, recordUrl, fallbackUt);
+      if (fallbackRows.length) {
+        return fallbackRows;
+      }
+      if (searchError) {
+        throw searchError;
+      }
+    }
+    const rawFullTextLinks = supplement.fullTextLinks ?? [];
+    const fullTextLinks = sanitizeFullTextLinks(rawFullTextLinks);
+    const fullTextLabels = fullTextLinks.map((link) => (link.label || "").trim()).filter(Boolean).join("; ");
+    const fullTextUrls = fullTextLinks.map((link) => (link.url || "").trim()).filter(Boolean).join("; ");
     const metadata = supplement.metadata ?? {};
+    const supplementalAuthors = extractAuthorNamesFromFullTextLinks(rawFullTextLinks);
+    const authorsStructured = expandStructuredAuthors(metadata.authors_structured ?? "", supplementalAuthors);
+    const authors = pickBestAuthors(
+      formatAuthors(record),
+      authorsStructured,
+      fullTextLinks
+    );
     const authorKeywords = extractKeywordGroup(record, "author_keywords") || metadata.author_keywords || "";
     const keywordsPlus = extractKeywordGroup(record, "keywords_plus") || metadata.keywords_plus || "";
     const rows = [
       { field: "title", value: firstTitle(record, "item") },
-      { field: "authors", value: formatAuthors(record) },
+      { field: "authors", value: authors },
       { field: "year", value: record.pub_info?.pubyear ?? "" },
       { field: "source", value: firstTitle(record, "source") },
       { field: "doi", value: record.doi ?? "" },
@@ -789,14 +1113,14 @@ cli({
       { field: "email_addresses", value: metadata.email_addresses ?? "" },
       { field: "research_areas", value: metadata.research_areas ?? "" },
       { field: "wos_categories", value: metadata.wos_categories ?? "" },
-      { field: "authors_structured", value: metadata.authors_structured ?? "" },
+      { field: "authors_structured", value: authorsStructured },
       { field: "current_publisher", value: metadata.current_publisher ?? "" },
       { field: "author_keywords", value: authorKeywords },
       { field: "keywords_plus", value: keywordsPlus },
       { field: "citations_woscc", value: String(record.citation_related?.counts?.WOSCC ?? "") },
       { field: "citations_alldb", value: String(record.citation_related?.counts?.ALLDB ?? "") },
       { field: "cited_references", value: metadata.cited_references ?? "" },
-      { field: "full_text_links", value: fullTextLinks },
+      { field: "full_text_links", value: fullTextLabels },
       { field: "full_text_urls", value: fullTextUrls },
       { field: "url", value: recordUrl }
     ].filter((row) => row.value !== "");
