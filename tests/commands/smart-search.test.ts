@@ -47,7 +47,7 @@ describe('webofscience smart-search', () => {
     expect(databaseArg?.help).toContain('Defaults to woscc');
   });
 
-  it('retries once when SID is missing, then maps records from runQuerySearch', async () => {
+  it('waits for SID to appear before retrying submit, then maps records from runQuerySearch', async () => {
     const cmd = getRegistry().get('webofscience/smart-search');
     expect(cmd?.func).toBeTypeOf('function');
 
@@ -110,7 +110,7 @@ describe('webofscience smart-search', () => {
       { settleMs: 4000 },
     );
     expect(page.typeText).toHaveBeenCalledWith('#composeQuerySmartSearch', 'machine learning');
-    expect(page.click).toHaveBeenCalledTimes(2);
+    expect(page.click).toHaveBeenCalledTimes(1);
     expect(result).toEqual([
       {
         rank: 1,
@@ -263,6 +263,34 @@ describe('webofscience smart-search', () => {
         url: 'https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:001',
       },
     ]);
+  });
+
+  it('waits for the summary page when a SID appears before smart-search navigation finishes', async () => {
+    const cmd = getRegistry().get('webofscience/smart-search');
+    expect(cmd?.func).toBeTypeOf('function');
+
+    const page = createPageMock([
+      { sid: 'SIDVERIFY', href: 'https://webofscience.clarivate.cn/wos/woscc/smart-search' },
+      { sid: 'SIDREADY', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      [
+        {
+          key: 'records',
+          payload: {
+            1: {
+              ut: 'WOS:003',
+              titles: {
+                item: { en: [{ title: 'Summary wait test' }] },
+              },
+            },
+          },
+        },
+      ],
+    ]);
+
+    const result = await cmd!.func!(page, { query: 'wait for summary', limit: 1 }) as Array<{ title: string }>;
+
+    expect(result[0]).toMatchObject({ title: 'Summary wait test' });
+    expect(page.click).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to Enter when the submit button is unavailable', async () => {

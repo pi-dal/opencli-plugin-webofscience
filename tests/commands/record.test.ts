@@ -190,6 +190,32 @@ Journal Impact Factor`;
     });
   });
 
+  it('normalizes noisy document type and concatenated research areas from page text', () => {
+    const body = `Document Type
+Article Jump to arrow_downward Enriched Cited References
+Abstract
+Example abstract
+Research Areas
+EngineeringOperations Research & Management Science
+Web of Science Categories
+Engineering, Industrial`;
+
+    expect(extractSupplementMetadataFromText(body)).toMatchObject({
+      document_type: 'Article',
+      research_areas: 'Engineering; Operations Research & Management Science',
+    });
+  });
+
+  it('trims noisy ids number decorations from page text', () => {
+    const body = `IDS Number
+5MP6P Treatment From Inspec® View record in Inspec® Treatment BibliographyPracticalExperimental
+Journal information`;
+
+    expect(extractSupplementMetadataFromText(body)).toMatchObject({
+      ids_number: '5MP6P',
+    });
+  });
+
   it('fetches a full record by UT using the ALLDB database when provided', async () => {
     const cmd = getRegistry().get('webofscience/record');
     expect(cmd?.func).toBeTypeOf('function');
@@ -318,9 +344,10 @@ Journal Impact Factor`;
     const result = await cmd!.func!(page, { id: 'WOS:001335131500001', database: 'alldb' });
 
     expect(page.goto).toHaveBeenNthCalledWith(1,
-      'https://webofscience.clarivate.cn/wos/alldb/smart-search',
+      'https://webofscience.clarivate.cn/wos/alldb/basic-search',
       { settleMs: 4000 },
     );
+    expect(page.typeText).toHaveBeenCalledWith('#search-option-0', 'UT=(WOS:001335131500001)');
     expect(page.goto).toHaveBeenNthCalledWith(2,
       'https://webofscience.clarivate.cn/wos/alldb/full-record/WOS:001335131500001',
       { settleMs: 4000 },
@@ -490,9 +517,10 @@ Journal Impact Factor`,
     }) as Array<{ field: string; value: string }>;
 
     expect(page.goto).toHaveBeenCalledWith(
-      'https://webofscience.clarivate.cn/wos/alldb/smart-search',
+      'https://webofscience.clarivate.cn/wos/alldb/basic-search',
       { settleMs: 4000 },
     );
+    expect(page.typeText).toHaveBeenCalledWith('#search-option-0', 'UT=(WOS:009999999999999)');
     expect(result[0]).toEqual({ field: 'title', value: 'URL input record' });
   });
 
@@ -734,5 +762,183 @@ Journal Impact Factor`,
         },
       ]),
     });
+  });
+
+  it('falls back to scraping the full-record page when exact search session establishment fails for a UT', async () => {
+    const cmd = getRegistry().get('webofscience/record');
+    expect(cmd?.func).toBeTypeOf('function');
+
+    const page = createPageMock([]);
+    vi.mocked(page.evaluate)
+      .mockRejectedValueOnce(new Error('Search session blocked by passive verification'))
+      .mockResolvedValueOnce({
+        bodyText: `Causal machine learning for supply chain risk prediction and intervention planning
+By
+Wyrembek, Mateusz
+George Baryannis
+Alexandra Brintrup
+Source
+INTERNATIONAL JOURNAL OF PRODUCTION RESEARCH
+Document Type
+Article Jump to arrow_downward Enriched Cited References
+DOI
+10.1080/00207543.2025.2458121
+Abstract
+This is a fallback abstract from the full-record page.
+Keywords
+Author Keywords
+causal machine learning
+supply chains
+Keywords Plus
+RISK PREDICTION
+Published
+AUG 3 2025
+Research Areas
+EngineeringOperations Research & Management Science
+Language
+English
+Accession Number
+WOS:001411195100001`,
+        fullTextLinks: [],
+      });
+
+    const result = await cmd!.func!(page, { id: 'WOS:001411195100001' }) as Array<{ field: string; value: string }>;
+
+    expect(page.goto).toHaveBeenNthCalledWith(
+      1,
+      'https://webofscience.clarivate.cn/wos/woscc/basic-search',
+      { settleMs: 4000 },
+    );
+    expect(page.goto).toHaveBeenNthCalledWith(
+      2,
+      'https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:001411195100001',
+      { settleMs: 4000 },
+    );
+    expect(result).toContainEqual({
+      field: 'title',
+      value: 'Causal machine learning for supply chain risk prediction and intervention planning',
+    });
+    expect(result).toContainEqual({
+      field: 'authors',
+      value: 'Wyrembek, Mateusz; George Baryannis; Alexandra Brintrup',
+    });
+    expect(result).toContainEqual({ field: 'year', value: '2025' });
+    expect(result).toContainEqual({ field: 'source', value: 'INTERNATIONAL JOURNAL OF PRODUCTION RESEARCH' });
+    expect(result).toContainEqual({ field: 'doi', value: '10.1080/00207543.2025.2458121' });
+    expect(result).toContainEqual({ field: 'ut', value: 'WOS:001411195100001' });
+    expect(result).toContainEqual({ field: 'abstract', value: 'This is a fallback abstract from the full-record page.' });
+    expect(result).toContainEqual({ field: 'document_type', value: 'Article' });
+    expect(result).toContainEqual({ field: 'research_areas', value: 'Engineering; Operations Research & Management Science' });
+  });
+
+  it('uses author names from supplemental full-text links when the API returns only one author and suppresses noisy full-text dumps', async () => {
+    const cmd = getRegistry().get('webofscience/record');
+    expect(cmd?.func).toBeTypeOf('function');
+
+    const page = createPageMock([
+      { sid: 'SIDAUTH', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      [
+        {
+          key: 'searchInfo',
+          payload: {
+            QueryID: 'QIDAUTH',
+            RecordsFound: 1,
+          },
+        },
+        {
+          key: 'records',
+          payload: {
+            1: {
+              ut: 'WOS:001411195100001',
+              doi: '10.1080/00207543.2025.2458121',
+              titles: {
+                item: { en: [{ title: 'Causal machine learning for supply chain risk prediction and intervention planning' }] },
+                source: { en: [{ title: 'INTERNATIONAL JOURNAL OF PRODUCTION RESEARCH' }] },
+              },
+              names: {
+                author: {
+                  en: [{ wos_standard: 'Wyrembek, Mateusz' }],
+                },
+              },
+              pub_info: { pubyear: '2025' },
+            },
+          },
+        },
+      ],
+      [
+        {
+          key: 'full-record',
+          payload: {
+            ut: 'WOS:001411195100001',
+            doi: '10.1080/00207543.2025.2458121',
+            titles: {
+              item: { en: [{ title: 'Causal machine learning for supply chain risk prediction and intervention planning' }] },
+              source: { en: [{ title: 'INTERNATIONAL JOURNAL OF PRODUCTION RESEARCH' }] },
+            },
+            names: {
+              author: {
+                en: [{ wos_standard: 'Wyrembek, Mateusz' }],
+              },
+            },
+            pub_info: { pubyear: '2025' },
+          },
+        },
+      ],
+      {
+        metadata: {
+          document_type: 'Article',
+          authors_structured: JSON.stringify([
+            {
+              name: 'Wyrembek, Mateusz',
+              address_refs: ['1'],
+              addresses: ['Poznan Univ Econ & Business, Dept Logist, Poznan, Poland'],
+            },
+          ]),
+        },
+        fullTextLinks: [
+          {
+            label: 'Context Sensitive Links',
+            url: 'https://webofscience.clarivate.cn/api/gateway?DestURL=https%3A%2F%2Fresolver.example.test%2Fresult%3Frft.au%3DWyrembek%252C%2BMateusz%26rft.au%3DBaryannis%252C%2BGeorge%26rft.au%3DBrintrup%252C%2BAlexandra',
+          },
+          { label: 'Extra 1', url: 'https://example.com/1.pdf' },
+          { label: 'Extra 2', url: 'https://example.com/2.pdf' },
+          { label: 'Extra 3', url: 'https://example.com/3.pdf' },
+          { label: 'Extra 4', url: 'https://example.com/4.pdf' },
+          { label: 'Extra 5', url: 'https://example.com/5.pdf' },
+          { label: 'Extra 6', url: 'https://example.com/6.pdf' },
+          { label: 'Extra 7', url: 'https://example.com/7.pdf' },
+          { label: 'Extra 8', url: 'https://example.com/8.pdf' },
+        ],
+      },
+    ]);
+
+    const result = await cmd!.func!(page, { id: 'WOS:001411195100001' }) as Array<{ field: string; value: string }>;
+
+    expect(result).toContainEqual({
+      field: 'authors',
+      value: 'Wyrembek, Mateusz; Baryannis, George; Brintrup, Alexandra',
+    });
+    expect(result).toContainEqual({
+      field: 'authors_structured',
+      value: JSON.stringify([
+        {
+          name: 'Wyrembek, Mateusz',
+          address_refs: ['1'],
+          addresses: ['Poznan Univ Econ & Business, Dept Logist, Poznan, Poland'],
+        },
+        {
+          name: 'Baryannis, George',
+          address_refs: [],
+          addresses: [],
+        },
+        {
+          name: 'Brintrup, Alexandra',
+          address_refs: [],
+          addresses: [],
+        },
+      ]),
+    });
+    expect(result.find(row => row.field === 'full_text_links')).toBeUndefined();
+    expect(result.find(row => row.field === 'full_text_urls')).toBeUndefined();
   });
 });

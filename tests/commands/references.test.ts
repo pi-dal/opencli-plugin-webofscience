@@ -116,4 +116,59 @@ describe('webofscience references', () => {
 
     await expect(cmd!.func!(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
   });
+
+  it('retries the cited references stream after a passive verification response', async () => {
+    const cmd = getRegistry().get('webofscience/references');
+    expect(cmd?.func).toBeTypeOf('function');
+
+    const page = createPageMock([
+      true,
+      {
+        streamText: JSON.stringify([
+          { key: 'error', payload: ['Server.passiveVerificationRequired'] },
+        ]),
+        debug: {},
+      },
+      {
+        streamText: JSON.stringify([
+          { key: 'searchInfo', payload: { QueryID: 'QIDREFS', RecordsFound: 1 } },
+          {
+            key: 'records',
+            payload: {
+              1: {
+                ut: '123456789',
+                doi: '10.1000/ref.retry',
+                titles: {
+                  source: { en: [{ title: 'RETRY JOURNAL' }] },
+                },
+                names: {
+                  author: {
+                    en: [{ wos_standard: 'Retry, A' }],
+                  },
+                },
+                pub_info: { pubyear: '2024' },
+                citation_related: { counts: { WOSCC: 2 } },
+              },
+            },
+          },
+        ]),
+        debug: {},
+      },
+    ]);
+
+    const result = await cmd!.func!(page, { id: 'WOS:001335131500001', limit: 1 });
+
+    expect(result).toEqual([
+      {
+        rank: 1,
+        title: 'RETRY JOURNAL',
+        authors: 'Retry, A',
+        year: '2024',
+        source: 'RETRY JOURNAL',
+        citations: 2,
+        doi: '10.1000/ref.retry',
+        url: '',
+      },
+    ]);
+  });
 });

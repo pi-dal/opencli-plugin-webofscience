@@ -180,6 +180,34 @@ describe('webofscience basic-search', () => {
     expect(result[0]).toMatchObject({ title: 'Preferred selector result' });
   });
 
+  it('waits for the summary page when a SID appears before basic-search navigation finishes', async () => {
+    const cmd = getRegistry().get('webofscience/basic-search');
+    expect(cmd?.func).toBeTypeOf('function');
+
+    const page = createPageMock([
+      { sid: 'SIDVERIFY', href: 'https://webofscience.clarivate.cn/wos/woscc/basic-search' },
+      { sid: 'SIDREADY', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      [
+        {
+          key: 'records',
+          payload: {
+            1: {
+              ut: 'WOS:105',
+              titles: {
+                item: { en: [{ title: 'Basic summary wait result' }] },
+              },
+            },
+          },
+        },
+      ],
+    ]);
+
+    const result = await cmd!.func!(page, { query: 'summary wait', limit: 1 }) as Array<{ title: string }>;
+
+    expect(result[0]).toMatchObject({ title: 'Basic summary wait result' });
+    expect(page.click).toHaveBeenCalledTimes(1);
+  });
+
   it('falls back to the visible basic-search submit button when the smart-search button is unavailable', async () => {
     const cmd = getRegistry().get('webofscience/basic-search');
     expect(cmd?.func).toBeTypeOf('function');
@@ -249,7 +277,7 @@ describe('webofscience basic-search', () => {
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SIDEMPTY', href: 'https://webofscience.clarivate.cn/wos/woscc/basic-search' },
+      { sid: 'SIDEMPTY', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
       [{ key: 'records', payload: {} }],
     ]);
 
