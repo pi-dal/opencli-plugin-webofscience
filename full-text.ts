@@ -1,13 +1,13 @@
 import { cli, Strategy } from '@jackwener/opencli/registry';
-import { ArgumentError, EmptyResultError } from './src/lib/errors';
+import { ArgumentError, CommandExecutionError, EmptyResultError, UpstreamServiceError } from './src/lib/errors';
 import {
   fullRecordUrl,
   normalizeDatabase,
   parseRecordIdentifier,
-  type WosDatabase,
 } from './src/lib/shared';
+import { scrapeWosFullTextLinks } from './src/lib/wos-full-text';
 
-type FullTextSource = 'openalex' | 'wos' | 'combined' | 'none';
+type FullTextSource = 'openalex' | 'wos' | 'none';
 type AccessType = 'open_access' | 'institutional' | 'unknown';
 
 type FullTextResult = {
@@ -30,22 +30,40 @@ interface OpenAlexWork {
   doi?: string;
 }
 
+/**
+ * Fetch an OpenAlex work by DOI. Throws UpstreamServiceError on 429/5xx
+ * so the caller can distinguish "no OA version" from "upstream is down".
+ */
 async function fetchOpenAlexWork(doi: string): Promise<OpenAlexWork | null> {
+  const url = `${OPENALEX_API}/works/doi:${encodeURIComponent(doi)}?mailto=opencli-plugin-webofscience@users.noreply.github.com`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  let res: Response;
   try {
-    const url = `${OPENALEX_API}/works/doi:${encodeURIComponent(doi)}?mailto=opencli-plugin-webofscience@users.noreply.github.com`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const res = await fetch(url, {
+    res = await fetch(url, {
       signal: controller.signal,
       headers: { accept: 'application/json' },
     });
+  } catch (error) {
     clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data as OpenAlexWork;
-  } catch {
-    return null;
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new UpstreamServiceError('OpenAlex API', 'timeout', 'The request timed out after 10s.');
+    }
+    throw new UpstreamServiceError('OpenAlex API', 'network-error', String(error));
+  } finally {
+    clearTimeout(timeout);
   }
+
+  if (res.status === 429) {
+    throw new UpstreamServiceError('OpenAlex API', 429, 'Rate limited. Try again later.');
+  }
+  if (res.status >= 500) {
+    throw new UpstreamServiceError('OpenAlex API', res.status, 'OpenAlex API returned a server error.');
+  }
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  return data as OpenAlexWork;
 }
 
 function isPdfUrl(url: string): boolean {
@@ -69,7 +87,7 @@ function buildFullTextResult(params: {
 
   // Determine source
   let source: FullTextSource = 'none';
-  if (hasOpenalex && hasWos) source = 'combined';
+  if (hasOpenalex && hasWos) source = 'openalex'; // OpenAlex preferred when both exist
   else if (hasOpenalex) source = 'openalex';
   else if (hasWos) source = 'wos';
 
@@ -100,80 +118,6 @@ function buildFullTextResult(params: {
   };
 }
 
-async function scrapeWosFullTextLinks(
-  page: {
-    goto: (url: string, options?: Record<string, unknown>) => Promise<any>;
-    wait: (seconds: number) => Promise<any>;
-    evaluate: (js: string) => Promise<any>;
-  },
-  url: string,
-): Promise<Array<{ label: string; url: string }>> {
-  await page.goto(url, { settleMs: 5000 });
-  await page.wait(3);
-
-  const links = await page.evaluate(`(async () => {
-    const normalize = (text) => String(text || '')
-      .replace(/\\u00a0/g, ' ')
-      .replace(/\\s+/g, ' ')
-      .trim();
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && rect.width > 0
-        && rect.height > 0;
-    };
-
-    // Click "Full Text Links" button if present to expand the section
-    const fullTextButton = Array.from(document.querySelectorAll('button'))
-      .find((el) => isVisible(el) && /full text links/i.test(String(el.textContent || '')));
-    if (fullTextButton) {
-      fullTextButton.click();
-      await new Promise(resolve => setTimeout(resolve, 400));
-    }
-
-    const allLinks = Array.from(document.querySelectorAll('a'))
-      .map((el) => ({
-        label: normalize(el.textContent || el.getAttribute('aria-label') || ''),
-        url: String(el.href || '').trim(),
-      }))
-      .filter((item) => item.url);
-
-    const filtered = [];
-    const seen = new Set();
-    for (const item of allLinks) {
-      const hay = (item.label + ' ' + item.url).toLowerCase();
-      if (hay.includes('google scholar')) continue;
-      if (hay.includes('journal citation reports')) continue;
-      if (hay.includes('journal citation indicator')) continue;
-      if (hay.includes('accessibility')) continue;
-      if (hay.includes('/wos/pqdt/')) continue;
-      const isFullText = hay.includes('context sensitive')
-        || hay.includes('free full text')
-        || hay.includes('view full text')
-        || hay.includes('full text on proquest')
-        || hay.includes('repository')
-        || hay.includes('submitted article')
-        || hay.includes('getftr')
-        || /\\.pdf($|\\?)/i.test(item.url)
-        || (hay.includes('proquest') && hay.includes('full text'));
-      if (!isFullText) continue;
-      const key = item.url;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      filtered.push({
-        label: item.label || 'Full Text Link',
-        url: item.url,
-      });
-    }
-
-    return filtered;
-  })()`);
-
-  return Array.isArray(links) ? links : [];
-}
-
 cli({
   site: 'webofscience',
   name: 'full-text',
@@ -187,7 +131,8 @@ cli({
     { name: 'id', positional: true, required: true, help: 'Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046' },
     { name: 'database', required: false, help: 'Database to use. Defaults to the database in the identifier URL, otherwise woscc.', choices: ['woscc', 'alldb'] },
   ],
-  columns: ['field', 'value'],
+  defaultFormat: 'json',
+  columns: ['best_url', 'best_pdf_url', 'open_access_url', 'wos_full_text_urls', 'source', 'access_type'],
   func: async (page, kwargs) => {
     const rawId = String(kwargs.id ?? '').trim();
     if (!rawId) throw new ArgumentError('Record identifier is required');
@@ -204,7 +149,17 @@ cli({
     const ut = identifier.kind === 'ut' ? identifier.value : '';
 
     // Step 1: Query OpenAlex for OA URL (if DOI is available)
-    const openalexWork = doi ? await fetchOpenAlexWork(doi) : null;
+    // OpenAlex 429/5xx throws UpstreamServiceError which propagates to user
+    // but does NOT block WoS results — handle separately.
+    let openalexWork: OpenAlexWork | null = null;
+    let openalexError: unknown = null;
+    if (doi) {
+      try {
+        openalexWork = await fetchOpenAlexWork(doi);
+      } catch (error) {
+        openalexError = error;
+      }
+    }
 
     // Step 2: Scrape WoS record page for full-text links (if UT is available)
     let wosLinks: Array<{ label: string; url: string }> = [];
@@ -221,16 +176,19 @@ cli({
 
     const result = buildFullTextResult({ openalexWork, wosLinks, wosAvailable });
 
-    if (!result.best_url) {
-      throw new EmptyResultError(
-        'webofscience full-text',
-        'No full-text entry URL found. The record may not have an open-access version, or your WoS session may not have access.',
-      );
+    // If we have any result, return it — don't let OpenAlex error block WoS data
+    if (result.best_url) {
+      return result;
     }
 
-    return Object.entries(result).map(([field, value]) => ({
-      field,
-      value: Array.isArray(value) ? value.join('; ') : String(value),
-    }));
+    // No results at all: surface typed error
+    if (openalexError) {
+      throw openalexError;
+    }
+
+    throw new EmptyResultError(
+      'webofscience full-text',
+      'No full-text entry URL found. The record may not have an open-access version, or your WoS session may not have access.',
+    );
   },
 });

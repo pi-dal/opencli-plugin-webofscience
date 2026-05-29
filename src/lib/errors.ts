@@ -14,3 +14,9 @@ export class EmptyResultError extends PluginError {
 }
 
 export class CommandExecutionError extends PluginError {}
+
+export class UpstreamServiceError extends PluginError {
+  constructor(service: string, status: number | string, hint?: string) {
+    super(`Upstream service ${service} returned status ${status}.`, hint);
+  }
+}

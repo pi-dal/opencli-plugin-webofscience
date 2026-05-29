@@ -15,6 +15,11 @@ var EmptyResultError = class extends PluginError {
     super([`No results found for ${command}.`, hint].filter(Boolean).join(" "));
   }
 };
+var UpstreamServiceError = class extends PluginError {
+  constructor(service, status, hint) {
+    super(`Upstream service ${service} returned status ${status}.`, hint);
+  }
+};
 
 // src/lib/shared.ts
 function normalizeDatabase(value, fallback = "woscc") {
@@ -54,66 +59,11 @@ function parseRecordIdentifier(input) {
   return null;
 }
 
-// full-text.ts
-var OPENALEX_API = "https://api.openalex.org";
-async function fetchOpenAlexWork(doi) {
-  try {
-    const url = `${OPENALEX_API}/works/doi:${encodeURIComponent(doi)}?mailto=opencli-plugin-webofscience@users.noreply.github.com`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1e4);
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { accept: "application/json" }
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data;
-  } catch {
-    return null;
-  }
-}
-function isPdfUrl(url) {
-  try {
-    const parsed = new URL(url);
-    return /\.pdf$/i.test(parsed.pathname);
-  } catch {
-    return url.toLowerCase().includes(".pdf");
-  }
-}
-function buildFullTextResult(params) {
-  const { openalexWork, wosLinks, wosAvailable } = params;
-  const oaUrl = openalexWork?.open_access?.oa_url || "";
-  const hasOpenalex = Boolean(oaUrl);
-  const hasWos = wosLinks.length > 0;
-  let source = "none";
-  if (hasOpenalex && hasWos) source = "combined";
-  else if (hasOpenalex) source = "openalex";
-  else if (hasWos) source = "wos";
-  let accessType = "unknown";
-  if (hasOpenalex) accessType = "open_access";
-  else if (hasWos && wosAvailable) accessType = "institutional";
-  const bestUrl = oaUrl || wosLinks[0]?.url || "";
-  let bestPdfUrl = "";
-  if (oaUrl && isPdfUrl(oaUrl)) bestPdfUrl = oaUrl;
-  if (!bestPdfUrl) {
-    const pdfLink = wosLinks.find((link) => isPdfUrl(link.url));
-    if (pdfLink) bestPdfUrl = pdfLink.url;
-  }
-  return {
-    best_url: bestUrl,
-    best_pdf_url: bestPdfUrl,
-    open_access_url: oaUrl,
-    wos_full_text_urls: wosLinks.map((l) => l.url),
-    wos_full_text_labels: wosLinks.map((l) => l.label),
-    source,
-    access_type: accessType
-  };
-}
+// src/lib/wos-full-text.ts
 async function scrapeWosFullTextLinks(page, url) {
   await page.goto(url, { settleMs: 5e3 });
   await page.wait(3);
-  const links = await page.evaluate(`(async () => {
+  const result = await page.evaluate(`(async () => {
     const normalize = (text) => String(text || '')
       .replace(/\\u00a0/g, ' ')
       .replace(/\\s+/g, ' ')
@@ -127,7 +77,6 @@ async function scrapeWosFullTextLinks(page, url) {
         && rect.height > 0;
     };
 
-    // Click "Full Text Links" button if present to expand the section
     const fullTextButton = Array.from(document.querySelectorAll('button'))
       .find((el) => isVisible(el) && /full text links/i.test(String(el.textContent || '')));
     if (fullTextButton) {
@@ -172,7 +121,76 @@ async function scrapeWosFullTextLinks(page, url) {
 
     return filtered;
   })()`);
-  return Array.isArray(links) ? links : [];
+  return Array.isArray(result) ? result : [];
+}
+
+// full-text.ts
+var OPENALEX_API = "https://api.openalex.org";
+async function fetchOpenAlexWork(doi) {
+  const url = `${OPENALEX_API}/works/doi:${encodeURIComponent(doi)}?mailto=opencli-plugin-webofscience@users.noreply.github.com`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1e4);
+  let res;
+  try {
+    res = await fetch(url, {
+      signal: controller.signal,
+      headers: { accept: "application/json" }
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new UpstreamServiceError("OpenAlex API", "timeout", "The request timed out after 10s.");
+    }
+    throw new UpstreamServiceError("OpenAlex API", "network-error", String(error));
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (res.status === 429) {
+    throw new UpstreamServiceError("OpenAlex API", 429, "Rate limited. Try again later.");
+  }
+  if (res.status >= 500) {
+    throw new UpstreamServiceError("OpenAlex API", res.status, "OpenAlex API returned a server error.");
+  }
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data;
+}
+function isPdfUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /\.pdf$/i.test(parsed.pathname);
+  } catch {
+    return url.toLowerCase().includes(".pdf");
+  }
+}
+function buildFullTextResult(params) {
+  const { openalexWork, wosLinks, wosAvailable } = params;
+  const oaUrl = openalexWork?.open_access?.oa_url || "";
+  const hasOpenalex = Boolean(oaUrl);
+  const hasWos = wosLinks.length > 0;
+  let source = "none";
+  if (hasOpenalex && hasWos) source = "openalex";
+  else if (hasOpenalex) source = "openalex";
+  else if (hasWos) source = "wos";
+  let accessType = "unknown";
+  if (hasOpenalex) accessType = "open_access";
+  else if (hasWos && wosAvailable) accessType = "institutional";
+  const bestUrl = oaUrl || wosLinks[0]?.url || "";
+  let bestPdfUrl = "";
+  if (oaUrl && isPdfUrl(oaUrl)) bestPdfUrl = oaUrl;
+  if (!bestPdfUrl) {
+    const pdfLink = wosLinks.find((link) => isPdfUrl(link.url));
+    if (pdfLink) bestPdfUrl = pdfLink.url;
+  }
+  return {
+    best_url: bestUrl,
+    best_pdf_url: bestPdfUrl,
+    open_access_url: oaUrl,
+    wos_full_text_urls: wosLinks.map((l) => l.url),
+    wos_full_text_labels: wosLinks.map((l) => l.label),
+    source,
+    access_type: accessType
+  };
 }
 cli({
   site: "webofscience",
@@ -187,7 +205,8 @@ cli({
     { name: "id", positional: true, required: true, help: "Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046" },
     { name: "database", required: false, help: "Database to use. Defaults to the database in the identifier URL, otherwise woscc.", choices: ["woscc", "alldb"] }
   ],
-  columns: ["field", "value"],
+  defaultFormat: "json",
+  columns: ["best_url", "best_pdf_url", "open_access_url", "wos_full_text_urls", "source", "access_type"],
   func: async (page, kwargs) => {
     const rawId = String(kwargs.id ?? "").trim();
     if (!rawId) throw new ArgumentError("Record identifier is required");
@@ -198,7 +217,15 @@ cli({
     const database = normalizeDatabase(kwargs.database, identifier.database ?? "woscc");
     const doi = identifier.kind === "doi" ? identifier.value : "";
     const ut = identifier.kind === "ut" ? identifier.value : "";
-    const openalexWork = doi ? await fetchOpenAlexWork(doi) : null;
+    let openalexWork = null;
+    let openalexError = null;
+    if (doi) {
+      try {
+        openalexWork = await fetchOpenAlexWork(doi);
+      } catch (error) {
+        openalexError = error;
+      }
+    }
     let wosLinks = [];
     let wosAvailable = false;
     if (ut) {
@@ -210,15 +237,15 @@ cli({
       }
     }
     const result = buildFullTextResult({ openalexWork, wosLinks, wosAvailable });
-    if (!result.best_url) {
-      throw new EmptyResultError(
-        "webofscience full-text",
-        "No full-text entry URL found. The record may not have an open-access version, or your WoS session may not have access."
-      );
+    if (result.best_url) {
+      return result;
     }
-    return Object.entries(result).map(([field, value]) => ({
-      field,
-      value: Array.isArray(value) ? value.join("; ") : String(value)
-    }));
+    if (openalexError) {
+      throw openalexError;
+    }
+    throw new EmptyResultError(
+      "webofscience full-text",
+      "No full-text entry URL found. The record may not have an open-access version, or your WoS session may not have access."
+    );
   }
 });
