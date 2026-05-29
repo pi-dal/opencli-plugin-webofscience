@@ -849,9 +849,10 @@ function hasSupplementData(supplement: RecordPageSupplement): boolean {
 cli({
   site: 'webofscience',
   name: 'record',
-  description: 'Fetch a Web of Science full record by UT, DOI, or full-record URL',
+  description: 'Fetch a Web of Science full record by UT, DOI, or full-record URL. Requires an active WoS session (institutional login) for DOI resolution.',
   domain: 'webofscience.clarivate.cn',
   strategy: Strategy.UI,
+  access: 'read',
   browser: true,
   navigateBefore: false,
   args: [
@@ -965,6 +966,8 @@ cli({
       if (searchError) {
         throw searchError;
       }
+      // If no record, no fallback, and no error, return empty rows
+      return [];
     }
 
     const rawFullTextLinks = supplement.fullTextLinks ?? [];
@@ -994,7 +997,7 @@ cli({
       { field: 'year', value: record.pub_info?.pubyear ?? '' },
       { field: 'source', value: firstTitle(record, 'source') },
       { field: 'doi', value: record.doi ?? '' },
-      { field: 'ut', value: record.ut ?? match.record.ut ?? '' },
+      { field: 'ut', value: record.ut ?? '' },
       { field: 'abstract', value: extractAbstract(record) },
       { field: 'document_type', value: metadata.document_type ?? '' },
       { field: 'article_number', value: metadata.article_number ?? '' },
