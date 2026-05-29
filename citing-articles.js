@@ -15,17 +15,8 @@ var EmptyResultError = class extends PluginError {
     super([`No results found for ${command}.`, hint].filter(Boolean).join(" "));
   }
 };
-var CommandExecutionError = class extends PluginError {
-};
 
 // src/lib/shared.ts
-var SUBMIT_BUTTON_SELECTOR = "button[aria-label='Submit your question']";
-var MAX_LIMIT = 50;
-function clampLimit(value) {
-  const parsed = Number(value ?? 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 10;
-  return Math.min(Math.floor(parsed), MAX_LIMIT);
-}
 function normalizeDatabase(value, fallback = "woscc") {
   if (value == null || value === "") return fallback;
   const normalized = String(value).trim().toLowerCase();
@@ -35,8 +26,8 @@ function normalizeDatabase(value, fallback = "woscc") {
 function toProduct(database) {
   return database === "alldb" ? "ALLDB" : "WOSCC";
 }
-function basicSearchUrl(database) {
-  return `https://webofscience.clarivate.cn/wos/${database}/basic-search`;
+function smartSearchUrl(database) {
+  return `https://webofscience.clarivate.cn/wos/${database}/smart-search`;
 }
 function fullRecordUrl(database, ut) {
   return `https://webofscience.clarivate.cn/wos/${database}/full-record/${ut}`;
@@ -44,235 +35,24 @@ function fullRecordUrl(database, ut) {
 function citingSummaryUrl(database, ut) {
   return `https://webofscience.clarivate.cn/wos/${database}/citing-summary/${ut}?from=${database}&type=colluid&siloSearchWarning=false`;
 }
-function buildSearchPayload(query, limit, database, rowText = `TS=(${query})`) {
-  const product = toProduct(database);
-  return {
-    product,
-    searchMode: "general_semantic",
-    viewType: "search",
-    serviceMode: "summary",
-    search: {
-      mode: "general_semantic",
-      database: product,
-      disableEdit: false,
-      query: [{ rowText }],
-      display: {
-        key: "nlp",
-        params: { input: query }
-      },
-      blending: "blended",
-      count: 100
-    },
-    retrieve: {
-      count: limit,
-      history: true,
-      jcr: true,
-      sort: "relevance",
-      analyzes: [
-        "TP.Value.6",
-        "REVIEW.Value.6",
-        "EARLY ACCESS.Value.6",
-        "OA.Value.6",
-        "DR.Value.6",
-        "ECR.Value.6",
-        "PY.Field_D.6",
-        "FPY.Field_D.6",
-        "DT.Value.6",
-        "AU.Value.6",
-        "DX2NG.Value.6",
-        "PEERREVIEW.Value.6",
-        "STK.Value.10"
-      ],
-      locale: "en"
-    },
-    eventMode: null
-  };
-}
-function extractSessionState(page) {
-  return page.evaluate(`(() => {
-    const entry = performance.getEntriesByType('resource')
-      .find(e => String(e.name).includes('/api/wosnx/core/runQuerySearch?SID='));
-    const sid = entry ? new URL(entry.name).searchParams.get('SID') : null;
-    return { sid, href: location.href };
-  })()`);
-}
-async function ensureSearchSessionAtUrl(page, url, query, preferredSelector, options = {}) {
-  const requireSummaryPage = options.requireSummaryPage === true;
-  const isSummaryHref = (href) => {
-    return typeof href === "string" && /\/summary\//.test(href);
-  };
-  const isReady = (session2) => {
-    return Boolean(session2?.sid) && (!requireSummaryPage || isSummaryHref(session2?.href));
-  };
-  const waitForReadySession = async (initialSession) => {
-    let session2 = initialSession ?? await extractSessionState(page);
-    for (let attempt = 0; attempt < 3 && !isReady(session2); attempt++) {
-      await page.wait(4);
-      session2 = await extractSessionState(page);
+async function dismissCookieConsent(page) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const clicked = await page.evaluate(`(() => {
+      const btn = document.querySelector('#accept-recommended-btn-handler')
+        || document.querySelector('#close-pc-btn-handler')
+        || document.querySelector('.onetrust-close-btn-handler');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()`);
+    if (clicked) {
+      await page.wait(1);
+      const stillThere = await page.evaluate(`(() => {
+        return !!document.querySelector('#onetrust-consent-sdk');
+      })()`);
+      if (!stillThere) return;
     }
-    return session2;
-  };
-  await page.goto(url, { settleMs: 4e3 });
-  await page.wait(2);
-  await typeIntoSearch(page, query, preferredSelector);
-  await page.wait(1);
-  await submitSearch(page);
-  await page.wait(6);
-  let session = await waitForReadySession();
-  if (!isReady(session)) {
-    await submitSearch(page);
-    await page.wait(10);
-    session = await waitForReadySession();
+    await page.wait(1);
   }
-  if (!isReady(session)) {
-    if (requireSummaryPage && session?.sid) {
-      throw new CommandExecutionError(
-        "Web of Science requested passive verification before search results could be fetched",
-        "Try again in Chrome after the verification completes."
-      );
-    }
-    throw new CommandExecutionError(
-      "Web of Science search session was not established",
-      "The page may still be waiting for passive verification. Try again in Chrome."
-    );
-  }
-  return session.sid;
-}
-async function submitSearch(page) {
-  try {
-    await page.click(SUBMIT_BUTTON_SELECTOR);
-    return;
-  } catch {
-  }
-  const submitRef = await findVisibleSubmitButtonRef(page);
-  if (submitRef) {
-    try {
-      await page.click(String(submitRef));
-      return;
-    } catch {
-    }
-  }
-  await page.pressKey("Enter");
-}
-async function findVisibleSubmitButtonRef(page) {
-  const ref = await page.evaluate(`(() => {
-    const submitRef = 'opencli-search-submit';
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && rect.width > 0
-        && rect.height > 0;
-    };
-    for (const node of document.querySelectorAll('[data-ref="opencli-search-submit"]')) {
-      node.removeAttribute('data-ref');
-    }
-    const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'))
-      .filter((el) => !el.disabled && isVisible(el));
-    const target = buttons.find((el) => {
-      const text = String(el.textContent || el.getAttribute('value') || '').trim();
-      const type = String(el.getAttribute('type') || '').toLowerCase();
-      const ariaLabel = String(el.getAttribute('aria-label') || '').trim();
-      const hay = (text + ' ' + ariaLabel).toLowerCase();
-      if (hay.includes('history')) return false;
-      if (hay.includes('saved searches')) return false;
-      if (hay.includes('search history')) return false;
-      return type === 'submit'
-        || /^search\b/.test(hay)
-        || hay.includes('submit your question');
-    });
-    if (!target) return null;
-    target.setAttribute('data-ref', submitRef);
-    return submitRef;
-  })()`);
-  return typeof ref === "string" ? ref : null;
-}
-async function typeIntoSearch(page, query, preferredSelector) {
-  const discoveredRef = "opencli-search-input";
-  if (preferredSelector) {
-    try {
-      await page.typeText(preferredSelector, query);
-      return;
-    } catch {
-    }
-  }
-  let selector = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    selector = await page.evaluate(`(() => {
-    const isVisible = (el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && rect.width > 0
-        && rect.height > 0;
-    };
-    for (const node of document.querySelectorAll('[data-ref="opencli-search-input"]')) {
-      node.removeAttribute('data-ref');
-    }
-    const candidates = Array.from(document.querySelectorAll('input, textarea'))
-      .filter((el) => !el.disabled && !el.readOnly && isVisible(el))
-      .sort((a, b) => {
-        const aScore = (a.matches('input[type="search"], input[type="text"], textarea') ? 10 : 0) + (a.placeholder ? 2 : 0);
-        const bScore = (b.matches('input[type="search"], input[type="text"], textarea') ? 10 : 0) + (b.placeholder ? 2 : 0);
-        return bScore - aScore;
-      });
-    const target = candidates[0];
-    if (!target) return null;
-    target.setAttribute('data-ref', ${JSON.stringify(discoveredRef)});
-    return ${JSON.stringify(discoveredRef)};
-  })()`);
-    if (selector) break;
-    if (attempt < 2) {
-      await page.wait(2);
-    }
-  }
-  if (!selector) {
-    throw new CommandExecutionError(
-      "Web of Science search input was not found",
-      "The search page may not have finished loading. Try again in Chrome."
-    );
-  }
-  try {
-    await page.typeText(String(selector), query);
-  } catch {
-    await page.wait(4);
-    await page.typeText(String(selector), query);
-  }
-}
-function formatAuthors(record) {
-  const authors = record.names?.author?.en ?? [];
-  return authors.map((author) => {
-    if (!author) return "";
-    if (author.wos_standard) return author.wos_standard;
-    const last = author.last_name?.trim();
-    const first = author.first_name?.trim();
-    if (last && first) return `${last}, ${first}`;
-    return last || first || "";
-  }).filter(Boolean).join("; ");
-}
-function firstTitle(record, branch) {
-  return record.titles?.[branch]?.en?.[0]?.title ?? "";
-}
-function extractRecords(events) {
-  if (!Array.isArray(events)) return [];
-  const eventList = events;
-  const errors = eventList.filter((event) => event?.key === "error").flatMap((event) => Array.isArray(event.payload) ? event.payload : []);
-  if (errors.includes("Server.passiveVerificationRequired")) {
-    throw new CommandExecutionError(
-      "Web of Science requested passive verification before search results could be fetched",
-      "Try again in Chrome after the verification completes."
-    );
-  }
-  if (errors.includes("Server.sessionNotFound")) {
-    throw new CommandExecutionError(
-      "Web of Science search session expired before results could be fetched",
-      "Try running the command again."
-    );
-  }
-  const recordsPayload = eventList.find((event) => event?.key === "records")?.payload ?? {};
-  return Object.values(recordsPayload);
 }
 function parseRecordIdentifier(input) {
   const trimmed = input.trim();
@@ -304,192 +84,85 @@ function parseRecordIdentifier(input) {
 function buildExactQuery(identifier) {
   return identifier.kind === "ut" ? `UT=(${identifier.value})` : `DO=(${identifier.value})`;
 }
-function findMatchingRecord(records, identifier) {
-  const needle = identifier.value.trim().toLowerCase();
-  for (const [index, record] of records.entries()) {
-    if (identifier.kind === "ut" && record.ut?.trim().toLowerCase() === needle) {
-      return { record, docNumber: index + 1 };
-    }
-    if (identifier.kind === "doi" && record.doi?.trim().toLowerCase() === needle) {
-      return { record, docNumber: index + 1 };
-    }
-  }
-  return records[0] ? { record: records[0], docNumber: 1 } : null;
-}
-function parseWosEventStream(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed;
-    }
-  } catch {
-  }
-  return raw.split("\n").map((line) => line.trim()).filter(Boolean).flatMap((line) => {
-    try {
-      return [JSON.parse(line)];
-    } catch {
-      return [];
-    }
-  });
-}
-async function fetchCurrentSummaryStreamRecords(page, database, limit, defaultMode) {
-  async function fetchOnce() {
-    return page.evaluate(`(async () => {
-    const href = String(location.href || '');
-    const qid = href.match(/\\/summary\\/([^/]+)/)?.[1] || '';
-    const pageNumber = Number(href.match(/\\/summary\\/[^/]+\\/[^/]+\\/(\\d+)/)?.[1] || '1') || 1;
-    const sort = href.match(/\\/summary\\/[^/]+\\/([^/]+)\\/\\d+/)?.[1] || 'relevance';
-    const sid = (() => {
-      try { return JSON.parse(String(localStorage.getItem('wos_sid') || '""')) || ''; } catch { return ''; }
-    })();
-    const searchState = (() => {
-      if (!qid) return null;
-      try { return JSON.parse(String(localStorage.getItem('wos_search_' + qid) || 'null')); } catch { return null; }
-    })();
-    if (!qid || !sid) {
-      return {
-        streamText: '',
-        debug: {
-          href,
-          qid,
-          pageNumber,
-          sort,
-          sid,
-          hasSearchState: !!searchState,
-          searchMode: searchState?.mode || ${JSON.stringify(defaultMode)},
-          product: ${JSON.stringify(toProduct(database))},
-          reason: 'missing-qid-or-sid',
-        },
-      };
-    }
-
-    const payload = {
-      qid,
-      retrieve: {
-        first: Math.max(1, ((pageNumber - 1) * ${MAX_LIMIT}) + 1),
-        sort,
-        count: ${MAX_LIMIT},
-        jcr: true,
-        highlight: false,
-        analyzes: [],
-      },
-      product: ${JSON.stringify(toProduct(database))},
-      searchMode: searchState?.mode || ${JSON.stringify(defaultMode)},
-      viewType: 'records',
-    };
-
-    const res = await fetch('/api/wosnx/core/runQueryGetRecordsStream?SID=' + encodeURIComponent(sid), {
-      method: 'POST',
-      credentials: 'include',
-      headers: {
-        accept: 'application/json, text/plain, */*',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const streamText = await res.text();
-    return {
-      streamText,
-      debug: {
-        href,
-        qid,
-        pageNumber,
-        sort,
-        sid,
-        hasSearchState: !!searchState,
-        searchMode: searchState?.mode || ${JSON.stringify(defaultMode)},
-        product: ${JSON.stringify(toProduct(database))},
-        responseOk: res.ok,
-        responseStatus: res.status,
-        textSnippet: String(streamText || '').slice(0, 500),
-      },
-    };
-  })()`);
-  }
-  await page.wait(6);
-  let first = await fetchOnce();
-  let records = [];
-  let firstError;
-  try {
-    records = extractRecords(parseWosEventStream(String(first?.streamText || "")));
-  } catch (error) {
-    firstError = error;
-  }
-  if (!records.length) {
-    await page.wait(firstError ? 8 : 4);
-    const second = await fetchOnce();
-    try {
-      records = extractRecords(parseWosEventStream(String(second?.streamText || "")));
-    } catch (error) {
-      if (process.env.OPENCLI_WOS_DEBUG_SUMMARY === "1") {
-        throw new CommandExecutionError(`Web of Science summary stream returned an error: ${JSON.stringify({
-          first: first?.debug || {},
-          second: second?.debug || {},
-          firstError: firstError instanceof Error ? firstError.message : String(firstError || ""),
-          secondError: error instanceof Error ? error.message : String(error || "")
-        })}`);
-      }
-      throw error;
-    }
-    if (!records.length && process.env.OPENCLI_WOS_DEBUG_SUMMARY === "1") {
-      throw new CommandExecutionError(`Web of Science summary stream returned no records: ${JSON.stringify({
-        first: first?.debug || {},
-        second: second?.debug || {},
-        firstError: firstError instanceof Error ? firstError.message : String(firstError || "")
-      })}`);
-    }
-  }
-  return records;
-}
 
 // citing-articles.ts
-async function resolveUt(page, rawId, database) {
-  const identifier = parseRecordIdentifier(rawId);
-  if (!identifier) {
-    throw new ArgumentError("Record identifier must be a Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046");
+async function fillAndSubmit(page, query) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await page.evaluate(`(async () => {
+        const query = ${JSON.stringify(query)};
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const normalize = (text) => String(text || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const isVisible = (el) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const setNativeValue = (input, value) => {
+          if (!input) return false;
+          const proto = Object.getPrototypeOf(input);
+          const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+            || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          descriptor?.set?.call(input, value);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        };
+        const searchInput = document.querySelector('textarea#composeQuerySmartSearch, #search-option-0')
+          || Array.from(document.querySelectorAll('textarea, input[type="text"]')).find(el => isVisible(el));
+        if (!searchInput) throw new Error('Search input not found');
+        setNativeValue(searchInput, query);
+        await sleep(800);
+        const searchBtn = document.querySelector('button[aria-label="Search"], button[type="submit"]')
+          || Array.from(document.querySelectorAll('button')).find(el => isVisible(el)
+            && (normalize(el.textContent) === 'search' || String(el.getAttribute('aria-label')).toLowerCase().includes('search')));
+        if (searchBtn) { searchBtn.click(); return; }
+        searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+        await sleep(500);
+        searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      })()`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await page.wait(3);
+    }
   }
-  if (identifier.kind === "ut") return identifier.value;
-  const exactQuery = buildExactQuery(identifier);
-  const sid = await ensureSearchSessionAtUrl(
-    page,
-    basicSearchUrl(database),
-    exactQuery,
-    "#search-option-0",
-    { requireSummaryPage: true }
-  );
-  const events = await page.evaluate(`(async () => {
-    const payload = ${JSON.stringify(buildSearchPayload(rawId, 5, database, exactQuery))};
-    const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    return res.json();
-  })()`);
-  const match = findMatchingRecord(extractRecords(events), identifier);
-  if (!match?.record?.ut) {
-    throw new EmptyResultError("webofscience citing-articles", "Try using a Web of Science UT or full-record URL.");
+  throw lastError;
+}
+async function waitForSummaryUrl(page) {
+  let state = { href: "", text: "" };
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const raw = await page.evaluate(`(() => ({
+      href: String(location.href || ''),
+      text: String(document.body.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 6000),
+    }))()`);
+    state = { href: String(raw?.href ?? ""), text: String(raw?.text ?? "") };
+    if (state.href.includes("/summary/") || /results from Web of Science/i.test(state.text)) {
+      const qid = state.href.match(/\/summary\/([^/]+)/)?.[1] ?? "";
+      return { ...state, qid };
+    }
+    await page.wait(1);
   }
-  return match.record.ut;
+  return { ...state, qid: "" };
 }
 cli({
   site: "webofscience",
   name: "citing-articles",
-  description: "List articles citing a Web of Science record",
+  description: "List articles citing a Web of Science record. Requires an active WoS session (institutional login).",
   domain: "webofscience.clarivate.cn",
   strategy: Strategy.UI,
+  access: "read",
   browser: true,
   navigateBefore: false,
   args: [
     { name: "id", positional: true, required: true, help: "Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046" },
-    { name: "database", required: false, help: "Database to use. Defaults to the database in the URL, otherwise woscc.", choices: ["woscc", "alldb"] },
+    { name: "database", required: false, help: "Database to use. Defaults to woscc.", choices: ["woscc", "alldb"] },
     { name: "limit", type: "int", default: 10, help: "Max results (max 50)" }
   ],
-  columns: ["rank", "title", "authors", "year", "source", "citations", "doi", "url"],
+  defaultFormat: "plain",
+  columns: ["rank", "title", "authors", "source", "year", "cited", "url"],
   func: async (page, kwargs) => {
     const rawId = String(kwargs.id ?? "").trim();
     if (!rawId) throw new ArgumentError("Record identifier is required");
@@ -498,26 +171,130 @@ cli({
       throw new ArgumentError("Record identifier must be a Web of Science UT, DOI, or full-record URL, e.g. WOS:001335131500001 or 10.1016/j.patter.2024.101046");
     }
     const database = normalizeDatabase(kwargs.database, identifier.database ?? "woscc");
-    const limit = clampLimit(kwargs.limit);
-    const ut = await resolveUt(page, rawId, database);
-    const summaryUrl = citingSummaryUrl(database, ut);
-    await page.goto(fullRecordUrl(database, ut), { settleMs: 5e3 });
-    await page.wait(4);
-    await page.evaluate(`(() => { location.href = ${JSON.stringify(summaryUrl)}; return true; })()`);
-    const records = fetchCurrentSummaryStreamRecords(page, database, limit, "citing_article");
-    const rows = (await records).slice(0, limit).map((record, index) => ({
-      rank: index + 1,
-      title: firstTitle(record, "item"),
-      authors: formatAuthors(record),
-      year: record.pub_info?.pubyear ?? "",
-      source: firstTitle(record, "source"),
-      citations: record.citation_related?.counts?.WOSCC ?? 0,
-      doi: record.doi ?? "",
-      url: record.ut ? fullRecordUrl(database, record.ut) : ""
-    })).filter((row) => row.title);
-    if (!rows.length) {
-      throw new EmptyResultError("webofscience citing-articles", "Try opening the citing summary in Chrome once, then run again.");
+    const limit = Math.max(1, Math.min(50, Number(kwargs.limit ?? 10) || 10));
+    const searchQuery = buildExactQuery(identifier);
+    await page.goto(smartSearchUrl(database), { settleMs: 4e3 });
+    await page.wait(2);
+    await dismissCookieConsent(page);
+    await fillAndSubmit(page, searchQuery);
+    const { href, text, qid } = await waitForSummaryUrl(page);
+    const ut = await page.evaluate(`(() => {
+      const link = document.querySelector('a[href*="/full-record/"]');
+      if (!link) return '';
+      const m = (link.getAttribute('href') || '').match(/full-record\\/(WOS:[A-Z0-9]+)/);
+      return m?.[1] || '';
+    })()`);
+    if (!ut) {
+      throw new EmptyResultError(
+        "webofscience citing-articles",
+        `Could not find the record on the search results page. Try using a Web of Science UT directly, or check that you have an active WoS institutional login session in Chrome.`
+      );
     }
-    return rows;
+    await page.goto(citingSummaryUrl(database, ut), { settleMs: 8e3 });
+    await page.wait(5);
+    let rows = await page.evaluate(`(async () => {
+      const normalize = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
+      const results = [];
+      const items = document.querySelectorAll('app-record, mat-expansion-panel, [role="listitem"], .record-item');
+      for (const item of items) {
+        const text = normalize(item.textContent);
+        const link = item.querySelector('a[href*="/full-record/"]');
+        const title = link ? normalize(link.textContent) : '';
+        if (!title || title.length < 5) continue;
+        const href = link.getAttribute('href') || '';
+        const utMatch = href.match(/full-record\\/(WOS:[A-Z0-9]+)/);
+        results.push({
+          title,
+          authors: normalize(item.querySelector('.author, [class*="author"]')?.textContent || ''),
+          year: text.match(/\\b((?:19|20)\\d{2})\\b/)?.[1] || '',
+          source: normalize(item.querySelector('.source, .journal, [class*="source"]')?.textContent || ''),
+          cited: text.match(/(\\d+)\\s+Times\\s+Cited/i)?.[1] || text.match(/(\\d+)\\s+Citations?/i)?.[1] || '0',
+          ut: utMatch?.[1] || '',
+        });
+      }
+      if (results.length) return results;
+
+      // Broader fallback: find all record links
+      const links = Array.from(document.querySelectorAll('a[href*="/full-record/"]'));
+      const seen = new Set();
+      for (const link of links) {
+        const href = link.getAttribute('href') || '';
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const title = normalize(link.textContent);
+        if (!title || title.length < 5) continue;
+        const parent = link.closest('div, li, article');
+        const parentText = parent ? normalize(parent.textContent) : title;
+        const utMatch = href.match(/full-record\\/(WOS:[A-Z0-9]+)/);
+        results.push({
+          title,
+          authors: '',
+          year: parentText.match(/\\b((?:19|20)\\d{2})\\b/)?.[1] || '',
+          source: '',
+          cited: parentText.match(/(\\d+)\\s+Times\\s+Cited/i)?.[1] || parentText.match(/(\\d+)\\s+Citations?/i)?.[1] || '0',
+          ut: utMatch?.[1] || '',
+        });
+      }
+      return results;
+    })()`);
+    if (rows.length) {
+      return rows.slice(0, limit).map((item, index) => ({
+        rank: index + 1,
+        title: item.title,
+        authors: item.authors,
+        source: item.source,
+        year: item.year,
+        cited: item.cited,
+        url: item.ut ? fullRecordUrl(database, item.ut) : ""
+      }));
+    }
+    const sid = await page.evaluate(`(() => {
+      try {
+        for (const e of performance.getEntriesByType('resource')) {
+          const s = new URL(e.name).searchParams.get('SID');
+          if (s) return s;
+        }
+      } catch (_) {}
+      return '';
+    })()`);
+    if (sid) {
+      const records = await page.evaluate(`(async () => {
+        const sid = ${JSON.stringify(sid)};
+        const ut = ${JSON.stringify(ut)};
+        const database = ${JSON.stringify(database)};
+        const limit = ${JSON.stringify(limit)};
+        const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(sid), {
+          method: 'POST', credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            qid: ut, product: ${JSON.stringify(toProduct(database))}, searchMode: 'citing_article',
+            viewType: 'summary',
+            retrieve: { first: limit, count: 0, citations: true },
+          }),
+        });
+        const text = await res.text();
+        const events = text.split('\\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+        const records = [];
+        for (const event of events) {
+          const recs = event?.payload?.records || event?.payload?.data?.records || [];
+          if (recs.length) records.push(...recs);
+        }
+        return records.map(r => ({
+          title: r?.title?.item?.value || '',
+          authors: String(r?.authors?.value || r?.author?.value || ''),
+          year: String(r?.pub_info?.pubyear || ''),
+          source: r?.title?.source?.value || '',
+          cited: String(r?.citation_related?.counts?.[${JSON.stringify(toProduct(database))}] || '0'),
+          ut: r?.ut || '',
+        })).filter(r => r.title).slice(0, limit);
+      })()`);
+      if (records.length) {
+        return records.map((r, i) => ({ rank: i + 1, ...r, url: r.ut ? fullRecordUrl(database, r.ut) : "" }));
+      }
+    }
+    throw new EmptyResultError(
+      "webofscience citing-articles",
+      "No citing articles found. This command requires an active WoS institutional login. Try opening https://webofscience.clarivate.cn in Chrome first."
+    );
   }
 });

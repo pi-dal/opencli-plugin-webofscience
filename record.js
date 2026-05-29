@@ -35,7 +35,7 @@ function basicSearchUrl(database) {
 function fullRecordUrl(database, ut) {
   return `https://webofscience.clarivate.cn/wos/${database}/full-record/${ut}`;
 }
-function buildSearchPayload(query, limit, database, rowText = `TS=(${query})`) {
+function buildSearchPayload(query, limit, database, rowText = `TS=(${query})`, analyzeFacet) {
   const product = toProduct(database);
   return {
     product,
@@ -59,7 +59,7 @@ function buildSearchPayload(query, limit, database, rowText = `TS=(${query})`) {
       history: true,
       jcr: true,
       sort: "relevance",
-      analyzes: [
+      analyzes: analyzeFacet ? [analyzeFacet] : [
         "TP.Value.6",
         "REVIEW.Value.6",
         "EARLY ACCESS.Value.6",
@@ -127,7 +127,7 @@ async function ensureSearchSessionAtUrl(page, url, query, preferredSelector, opt
       "The page may still be waiting for passive verification. Try again in Chrome."
     );
   }
-  return session.sid;
+  return session.sid ?? "";
 }
 async function submitSearch(page) {
   try {
@@ -279,12 +279,12 @@ function parseRecordIdentifier(input) {
       const doi = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
       return doi ? { kind: "doi", value: doi } : null;
     }
-    const match2 = url.pathname.match(/\/wos\/(woscc|alldb)\/full-record\/([^/?#]+)/i);
-    if (match2) {
+    const match = url.pathname.match(/\/wos\/(woscc|alldb)\/full-record\/([^/?#]+)/i);
+    if (match) {
       return {
         kind: "ut",
-        value: decodeURIComponent(match2[2]),
-        database: normalizeDatabase(match2[1])
+        value: decodeURIComponent(match[2]),
+        database: normalizeDatabase(match[1])
       };
     }
   } catch {
@@ -444,8 +444,8 @@ function stripTrailingMetadataLabels(value) {
   const normalized = normalizeTextValue(value);
   if (!normalized) return "";
   const trailingLabelPattern = /\s(?:Language|Accession Number|PubMed ID|ISSN|IDS Number)\b/i;
-  const match2 = normalized.match(trailingLabelPattern);
-  return match2?.index != null ? normalized.slice(0, match2.index).trim() : normalized;
+  const match = normalized.match(trailingLabelPattern);
+  return match?.index != null ? normalized.slice(0, match.index).trim() : normalized;
 }
 function normalizeDelimitedList(value) {
   const normalized = normalizeTextValue(value);
@@ -486,7 +486,7 @@ function cleanAuthorLine(value) {
   const normalized = normalizeTextValue(value);
   if (!normalized) return null;
   if (isMetadataNoiseLine(normalized)) return null;
-  const refs = Array.from(normalized.matchAll(/\[(\d+(?:,\d+)*)\]/g)).flatMap((match2) => String(match2[1] || "").split(",")).map((item) => item.trim()).filter(Boolean);
+  const refs = Array.from(normalized.matchAll(/\[(\d+(?:,\d+)*)\]/g)).flatMap((match) => String(match[1] || "").split(",")).map((item) => item.trim()).filter(Boolean);
   const parenthetical = normalized.match(/\(([^()]+,[^()]+)\)/)?.[1];
   const cleaned = normalizeTextValue(
     (parenthetical || normalized).replace(/\[[^\]]+\]/g, " ").replace(/\([^()]*\)/g, parenthetical ? " " : "").replace(/\s+\d+(?:,\d+)*$/g, " ")
@@ -508,18 +508,18 @@ function extractStructuredAuthors(body) {
     "E-mail Addresses",
     "Categories/ Classification"
   ])) {
-    const match2 = line.match(/^(\d+)\s+(.+)$/);
-    if (!match2) continue;
-    addressMap.set(match2[1], normalizeTextValue(match2[2]));
+    const match = line.match(/^(\d+)\s+(.+)$/);
+    if (!match) continue;
+    addressMap.set(match[1], normalizeTextValue(match[2]));
   }
   const authors = [];
   for (let index = byIndex + 1; index < lines.length; index++) {
     const line = lines[index];
     if (isSectionBoundary(line, ["Addresses", "E-mail Addresses", "Keywords", "Source", "Abstract"])) break;
-    const match2 = line.match(/^(.+?)(\d+(?:,\d+)*)$/);
-    if (match2) {
-      const name = normalizeTextValue(match2[1]);
-      const refs = match2[2].split(",").map((item) => item.trim()).filter(Boolean);
+    const match = line.match(/^(.+?)(\d+(?:,\d+)*)$/);
+    if (match) {
+      const name = normalizeTextValue(match[1]);
+      const refs = match[2].split(",").map((item) => item.trim()).filter(Boolean);
       if (!name || !refs.length) continue;
       authors.push({
         name,
@@ -602,7 +602,7 @@ function extractAuthorNamesFromFullTextLinks(links) {
     for (const candidate of uniqueValues(candidates)) {
       const directMatches = Array.from(
         candidate.matchAll(/(?:^|[?&])rft\.au=([^&]+)/g),
-        (match2) => normalizeAuthorDisplayName(match2[1] || "")
+        (match) => normalizeAuthorDisplayName(match[1] || "")
       ).filter(Boolean);
       if (directMatches.length) {
         names.push(...directMatches);
@@ -722,7 +722,7 @@ function extractSupplementMetadataFromText(body) {
   ]);
   const authorAddresses = uniqueValues(addressSection).join("; ");
   if (authorAddresses) metadata.author_addresses = authorAddresses;
-  const emails = uniqueValues(Array.from(text.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi), (match2) => match2[0]));
+  const emails = uniqueValues(Array.from(text.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi), (match) => match[0]));
   if (emails.length) metadata.email_addresses = emails.join("; ");
   const researchAreas = extractInlineOrSectionValue(text, "Research Areas", [
     "Citation Topics",
@@ -975,9 +975,10 @@ function hasSupplementData(supplement) {
 cli({
   site: "webofscience",
   name: "record",
-  description: "Fetch a Web of Science full record by UT, DOI, or full-record URL",
+  description: "Fetch a Web of Science full record by UT, DOI, or full-record URL. Requires an active WoS session (institutional login) for DOI resolution.",
   domain: "webofscience.clarivate.cn",
   strategy: Strategy.UI,
+  access: "read",
   browser: true,
   navigateBefore: false,
   args: [
@@ -1021,19 +1022,19 @@ cli({
       })()`);
       const queryId = extractQueryId(searchEvents);
       const records = extractRecords(searchEvents);
-      const match2 = findMatchingRecord(records, identifier);
-      if (!queryId || !match2?.record) {
+      const match = findMatchingRecord(records, identifier);
+      if (!queryId || !match?.record) {
         throw new EmptyResultError("webofscience record", "Try using a Web of Science UT, DOI, or verify your Web of Science access in Chrome");
       }
       const product = toProduct(database);
       const fullRecordPayload = buildFullRecordPayload({
         qid: queryId,
-        docNumber: match2.docNumber,
+        docNumber: match.docNumber,
         product,
-        coll: match2.record.coll ?? product,
+        coll: match.record.coll ?? product,
         searchMode: "general_semantic"
       });
-      record = match2.record;
+      record = match.record;
       try {
         const fullRecordEvents = await page.evaluate(`(async () => {
           const payload = ${JSON.stringify(fullRecordPayload)};
@@ -1076,6 +1077,7 @@ cli({
       if (searchError) {
         throw searchError;
       }
+      return [];
     }
     const rawFullTextLinks = supplement.fullTextLinks ?? [];
     const fullTextLinks = sanitizeFullTextLinks(rawFullTextLinks);
@@ -1097,7 +1099,7 @@ cli({
       { field: "year", value: record.pub_info?.pubyear ?? "" },
       { field: "source", value: firstTitle(record, "source") },
       { field: "doi", value: record.doi ?? "" },
-      { field: "ut", value: record.ut ?? match.record.ut ?? "" },
+      { field: "ut", value: record.ut ?? "" },
       { field: "abstract", value: extractAbstract(record) },
       { field: "document_type", value: metadata.document_type ?? "" },
       { field: "article_number", value: metadata.article_number ?? "" },
