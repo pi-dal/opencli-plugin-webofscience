@@ -33,7 +33,8 @@ function createPageMock(evaluateResults: any[]): IPage {
     getInterceptedRequests: vi.fn().mockResolvedValue([]),
     getCookies: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(''),
-  };
+    fetchJson: vi.fn().mockResolvedValue(undefined),
+    fillText: vi.fn().mockResolvedValue({ filled: true, verified: true, expected: '', actual: '', length: 0, matches_n: 1, match_level: 'exact' }),  };
 }
 
 describe('webofscience smart-search', () => {
@@ -81,7 +82,7 @@ describe('webofscience smart-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'machine learning', limit: 2 });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'machine learning', limit: 2 });
 
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/woscc/smart-search',
@@ -125,7 +126,7 @@ describe('webofscience smart-search', () => {
       '',
     ]);
 
-    await expect(cmd!.func!(page, { query: 'nohits', limit: 5 })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'nohits', limit: 5 })).rejects.toThrow(EmptyResultError);
   });
 
   it('uses the ALLDB smart-search route and maps DOM-scraped records', async () => {
@@ -149,7 +150,7 @@ describe('webofscience smart-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'quantum', database: 'alldb', limit: 1 });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'quantum', database: 'alldb', limit: 1 });
 
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/alldb/smart-search',
@@ -190,7 +191,7 @@ describe('webofscience smart-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'test', limit: 1 });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'test', limit: 1 });
 
     expect(result).toEqual([
       {
@@ -238,7 +239,7 @@ describe('webofscience smart-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'api fallback', limit: 1 }) as Array<{ title: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'api fallback', limit: 1 }) as Array<{ title: string }>;
 
     expect(result[0]).toMatchObject({ title: 'API fallback smart search' });
   });

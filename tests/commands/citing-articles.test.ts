@@ -33,7 +33,8 @@ function createPageMock(evaluateResults: any[]): IPage {
     getInterceptedRequests: vi.fn().mockResolvedValue([]),
     getCookies: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(''),
-  };
+    fetchJson: vi.fn().mockResolvedValue(undefined),
+    fillText: vi.fn().mockResolvedValue({ filled: true, verified: true, expected: '', actual: '', length: 0, matches_n: 1, match_level: 'exact' }),  };
 }
 
 describe('webofscience citing-articles', () => {
@@ -74,7 +75,7 @@ describe('webofscience citing-articles', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:001335131500001', limit: 1 });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001335131500001', limit: 1 });
 
     expect(page.goto).toHaveBeenNthCalledWith(
       1,
@@ -111,7 +112,7 @@ describe('webofscience citing-articles', () => {
       '',
     ]);
 
-    await expect(cmd!.func!(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
   });
 
   it('throws EmptyResultError when the citing summary page has no records and no SID fallback', async () => {
@@ -129,7 +130,7 @@ describe('webofscience citing-articles', () => {
       '',
     ]);
 
-    await expect(cmd!.func!(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
   });
 
   it('falls back to API from within browser context when DOM scrape yields no records', async () => {
@@ -158,7 +159,7 @@ describe('webofscience citing-articles', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:001335131500001', limit: 1 }) as Array<{ title?: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001335131500001', limit: 1 }) as Array<{ title?: string }>;
 
     expect(result[0]).toMatchObject({ title: 'API citing result' });
   });

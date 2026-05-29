@@ -34,6 +34,8 @@ function createPageMock(evaluateResults: any[]): IPage {
     getInterceptedRequests: vi.fn().mockResolvedValue([]),
     getCookies: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(''),
+    fetchJson: vi.fn().mockResolvedValue(undefined),
+    fillText: vi.fn().mockResolvedValue({ filled: true, verified: true, expected: '', actual: '', length: 0, matches_n: 1, match_level: 'exact' }),
   };
 }
 
@@ -124,7 +126,7 @@ describe('webofscience basic-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'basic', database: 'alldb', limit: 1, field: 'title' });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'basic', database: 'alldb', limit: 1, field: 'title' });
 
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/alldb/basic-search',
@@ -165,7 +167,7 @@ describe('webofscience basic-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'test', limit: 1 }) as Array<{ title: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'test', limit: 1 }) as Array<{ title: string }>;
 
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/woscc/basic-search',
@@ -198,7 +200,7 @@ describe('webofscience basic-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'summary wait', limit: 1 }) as Array<{ title: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'summary wait', limit: 1 }) as Array<{ title: string }>;
 
     expect(result[0]).toMatchObject({ title: 'Summary wait result' });
   });
@@ -238,7 +240,7 @@ describe('webofscience basic-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'fallback', limit: 1 }) as Array<{ title: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'fallback', limit: 1 }) as Array<{ title: string }>;
 
     expect(result[0]).toMatchObject({ title: 'API fallback result' });
   });
@@ -265,7 +267,7 @@ describe('webofscience basic-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'late field', limit: 1 }) as Array<{ title: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'late field', limit: 1 }) as Array<{ title: string }>;
 
     expect(result[0]).toMatchObject({ title: 'Late field result' });
   });
@@ -284,6 +286,6 @@ describe('webofscience basic-search', () => {
       '',
     ]);
 
-    await expect(cmd!.func!(page, { query: 'none' })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'none' })).rejects.toThrow(EmptyResultError);
   });
 });
