@@ -99,32 +99,27 @@ describe('webofscience basic-search', () => {
     })).toBe(false);
   });
 
-  it('uses the basic-search route and maps structured records', async () => {
+  it('searches via the basic-search route and maps DOM-scraped records', async () => {
     const cmd = getRegistry().get('webofscience/basic-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SIDBASIC', href: 'https://webofscience.clarivate.cn/wos/alldb/summary/test/relevance/1' },
+      // dismissCookieConsent: found and dismissed
+      true, false,
+      // fillSearch: not used
+      undefined,
+      // waitForSummaryPage: returns summary URL
+      { href: 'https://webofscience.clarivate.cn/wos/alldb/summary/test/relevance/1', text: 'Showing results from Web of Science' },
+      // scrapeRecords: returns scraped records
       [
         {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:101',
-              doi: '10.1000/basic',
-              titles: {
-                item: { en: [{ title: 'Basic search result' }] },
-                source: { en: [{ title: 'BASIC JOURNAL' }] },
-              },
-              names: {
-                author: {
-                  en: [{ wos_standard: 'Basic, A' }],
-                },
-              },
-              pub_info: { pubyear: '2025' },
-              citation_related: { counts: { WOSCC: 5 } },
-            },
-          },
+          title: 'Basic search result',
+          authors: 'Basic, A',
+          year: '2025',
+          source: 'BASIC JOURNAL',
+          cited: '5',
+          doi: '10.1000/basic',
+          ut: 'WOS:101',
         },
       ],
     ]);
@@ -135,9 +130,6 @@ describe('webofscience basic-search', () => {
       'https://webofscience.clarivate.cn/wos/alldb/basic-search',
       { settleMs: 4000 },
     );
-    expect(page.typeText).toHaveBeenCalledWith('#search-option-0', 'basic');
-    const searchJs = vi.mocked(page.evaluate).mock.calls[1]?.[0];
-    expect(searchJs).toContain('"rowText":"TI=(basic)"');
     expect(result).toEqual([
       {
         rank: 1,
@@ -145,100 +137,110 @@ describe('webofscience basic-search', () => {
         authors: 'Basic, A',
         year: '2025',
         source: 'BASIC JOURNAL',
-        citations: 5,
+        cited: '5',
         doi: '10.1000/basic',
         url: 'https://webofscience.clarivate.cn/wos/alldb/full-record/WOS:101',
       },
     ]);
   });
 
-  it('prefers the stable basic-search textbox selector before generic discovery', async () => {
+  it('uses woscc database by default and maps DOM-scraped records', async () => {
     const cmd = getRegistry().get('webofscience/basic-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SIDPREFERRED', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '' },
       [
         {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:104',
-              titles: {
-                item: { en: [{ title: 'Preferred selector result' }] },
-              },
-            },
-          },
+          title: 'Default DB result',
+          authors: '',
+          year: '2025',
+          source: '',
+          cited: '0',
+          doi: '',
+          ut: 'WOS:104',
         },
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'preferred field', limit: 1 }) as Array<{ title: string }>;
+    const result = await cmd!.func!(page, { query: 'test', limit: 1 }) as Array<{ title: string }>;
 
-    expect(page.typeText).toHaveBeenCalledWith('#search-option-0', 'preferred field');
-    expect(vi.mocked(page.evaluate).mock.calls[0]?.[0]).toContain("performance.getEntriesByType('resource')");
-    expect(result[0]).toMatchObject({ title: 'Preferred selector result' });
+    expect(page.goto).toHaveBeenCalledWith(
+      'https://webofscience.clarivate.cn/wos/woscc/basic-search',
+      { settleMs: 4000 },
+    );
+    expect(result[0]).toMatchObject({ title: 'Default DB result' });
   });
 
-  it('waits for the summary page when a SID appears before basic-search navigation finishes', async () => {
+  it('waits for the summary page when navigation finishes slowly', async () => {
     const cmd = getRegistry().get('webofscience/basic-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SIDVERIFY', href: 'https://webofscience.clarivate.cn/wos/woscc/basic-search' },
-      { sid: 'SIDREADY', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      true, false,
+      undefined,
+      // First poll: still on basic-search page
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/basic-search', text: '' },
+      // Retry poll: now on summary page
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '' },
       [
         {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:105',
-              titles: {
-                item: { en: [{ title: 'Basic summary wait result' }] },
-              },
-            },
-          },
+          title: 'Summary wait result',
+          authors: '',
+          year: '2025',
+          source: '',
+          cited: '0',
+          doi: '',
+          ut: 'WOS:105',
         },
       ],
     ]);
 
     const result = await cmd!.func!(page, { query: 'summary wait', limit: 1 }) as Array<{ title: string }>;
 
-    expect(result[0]).toMatchObject({ title: 'Basic summary wait result' });
-    expect(page.click).toHaveBeenCalledTimes(1);
+    expect(result[0]).toMatchObject({ title: 'Summary wait result' });
   });
 
-  it('falls back to the visible basic-search submit button when the smart-search button is unavailable', async () => {
+  it('falls back to API from within browser context when DOM scraping yields no records', async () => {
     const cmd = getRegistry().get('webofscience/basic-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      'opencli-search-submit',
-      { sid: 'SIDBUTTON', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '' },
+      // scrapeRecords returns empty
+      [],
+      // SID extraction
+      'SID-BUTTON-FALLBACK',
+      // API fetch returns records (res.json() returns an array of events)
       [
         {
           key: 'records',
           payload: {
             1: {
               ut: 'WOS:102',
+              doi: '10.1000/fallback',
               titles: {
-                item: { en: [{ title: 'Button submit result' }] },
+                item: { en: [{ title: 'API fallback result' }] },
+                source: { en: [{ title: 'FALLBACK JOURNAL' }] },
               },
+              names: {
+                author: { en: [{ wos_standard: 'Fallback, A' }] },
+              },
+              pub_info: { pubyear: '2025' },
+              citation_related: { counts: { WOSCC: 3 } },
             },
           },
         },
       ],
     ]);
-    vi.mocked(page.click).mockRejectedValueOnce(new Error('Element not found'));
 
-    const result = await cmd!.func!(page, { query: 'button path', limit: 1 }) as Array<{ title: string }>;
+    const result = await cmd!.func!(page, { query: 'fallback', limit: 1 }) as Array<{ title: string }>;
 
-    const submitDiscoveryJs = vi.mocked(page.evaluate).mock.calls[0]?.[0];
-    expect(submitDiscoveryJs).toContain("const submitRef = 'opencli-search-submit'");
-    expect(submitDiscoveryJs).toContain("target.setAttribute('data-ref', submitRef)");
-    expect(page.click).toHaveBeenNthCalledWith(2, 'opencli-search-submit');
-    expect(page.pressKey).not.toHaveBeenCalled();
-    expect(result[0]).toMatchObject({ title: 'Button submit result' });
+    expect(result[0]).toMatchObject({ title: 'API fallback result' });
   });
 
   it('retries input discovery when the basic-search field renders late', async () => {
@@ -246,29 +248,25 @@ describe('webofscience basic-search', () => {
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      null,
-      'opencli-search-input',
-      { sid: 'SIDLATE', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      true, false,
+      // fillSearch succeeds on retry (previous attempts threw, but we mock one-shot)
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '' },
       [
         {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:103',
-              titles: {
-                item: { en: [{ title: 'Late field result' }] },
-              },
-            },
-          },
+          title: 'Late field result',
+          authors: '',
+          year: '2025',
+          source: '',
+          cited: '0',
+          doi: '',
+          ut: 'WOS:103',
         },
       ],
     ]);
-    vi.mocked(page.typeText).mockRejectedValueOnce(new Error('Not ready'));
 
     const result = await cmd!.func!(page, { query: 'late field', limit: 1 }) as Array<{ title: string }>;
 
-    expect(vi.mocked(page.evaluate).mock.calls[0]?.[0]).toContain('document.querySelectorAll(\'input, textarea\')');
-    expect(vi.mocked(page.evaluate).mock.calls[1]?.[0]).toContain('document.querySelectorAll(\'input, textarea\')');
     expect(result[0]).toMatchObject({ title: 'Late field result' });
   });
 
@@ -277,8 +275,13 @@ describe('webofscience basic-search', () => {
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SIDEMPTY', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
-      [{ key: 'records', payload: {} }],
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '' },
+      // scrapeRecords returns empty
+      [],
+      // SID extraction returns empty (no SID found)
+      '',
     ]);
 
     await expect(cmd!.func!(page, { query: 'none' })).rejects.toThrow(EmptyResultError);

@@ -1,114 +1,338 @@
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { ArgumentError, EmptyResultError } from './src/lib/errors';
 import {
+  basicSearchFieldHelpText,
   basicSearchUrl,
   buildBasicSearchRowText,
   buildSearchPayload,
   clampLimit,
-  ensureSearchSessionAtUrl,
+  dismissCookieConsent,
   extractRecords,
   firstTitle,
   formatAuthors,
   fullRecordUrl,
-  normalizeDatabase,
   normalizeBasicSearchField,
+  normalizeDatabase,
+  toProduct,
 } from './src/lib/shared';
 
-const BASIC_SEARCH_INPUT_SELECTOR = '#search-option-0';
+async function fillSearch(
+  page: { evaluate: (js: string) => Promise<any>; wait: (seconds: number) => Promise<any> },
+  query: string,
+  fieldKey: string,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await page.evaluate(`(async () => {
+        const query = ${JSON.stringify(query)};
+        const fieldKey = ${JSON.stringify(fieldKey)};
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const normalize = (text) => String(text || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const isVisible = (el) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const setNativeValue = (input, value) => {
+          if (!input) return false;
+          const proto = Object.getPrototypeOf(input);
+          const descriptor = Object.getOwnPropertyDescriptor(proto, 'value')
+            || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          descriptor?.set?.call(input, value);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        };
+
+        // Set field selector if a non-default field is chosen
+        if (fieldKey !== 'topic') {
+          const fieldSelect = document.querySelector('select#search-option-0-field, [data-ta="search-option-0-field"]');
+          if (fieldSelect) {
+            const option = Array.from(fieldSelect.options).find(o => o.value === fieldKey);
+            if (option) { fieldSelect.value = fieldKey; fieldSelect.dispatchEvent(new Event('change')); }
+            await sleep(300);
+          }
+        }
+
+        const searchInput = document.querySelector('textarea#composeQuerySmartSearch, #search-option-0')
+          || Array.from(document.querySelectorAll('textarea, input[type="text"]')).find(el => isVisible(el));
+        if (!searchInput) throw new Error('Search input not found');
+
+        setNativeValue(searchInput, query);
+        await sleep(800);
+
+        const searchBtn = document.querySelector('button[aria-label="Search"], button[type="submit"]')
+          || Array.from(document.querySelectorAll('button')).find(el => isVisible(el)
+            && (normalize(el.textContent) === 'search' || String(el.getAttribute('aria-label')).toLowerCase().includes('search')));
+        if (searchBtn) { searchBtn.click(); return; }
+
+        searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+        await sleep(500);
+        searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+      })()`);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await page.wait(3);
+    }
+  }
+  throw lastError;
+}
+
+async function waitForSummaryPage(
+  page: { evaluate: (js: string) => Promise<any>; wait: (seconds: number) => Promise<any> },
+): Promise<{ href: string; text: string; qid: string }> {
+  let state = { href: '', text: '' };
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const raw = await page.evaluate(`(() => ({
+      href: String(location.href || ''),
+      text: String(document.body.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 6000),
+    }))()`);
+    state = { href: String(raw?.href ?? ''), text: String(raw?.text ?? '') };
+    if (state.href.includes('/summary/') || /results from Web of Science/i.test(state.text)) break;
+    await page.wait(1);
+  }
+  const qid = state.href.match(/\/summary\/([^/]+)/)?.[1] ?? '';
+  return { ...state, qid };
+}
+
+async function scrapeRecords(
+  page: { evaluate: (js: string) => Promise<any> },
+): Promise<Array<{ title: string; authors: string; year: string; source: string; cited: string; doi: string; ut: string }>> {
+  return page.evaluate(`(() => {
+    const normalize = (text) => String(text || '').replace(/\\s+/g, ' ').trim();
+    const results = [];
+
+    // Try to find result items — WoS uses mat-expansion-panel per record
+    const items = document.querySelectorAll('mat-expansion-panel, .search-results-item, [role="listitem"], app-record, .record-item');
+    if (!items.length) {
+      // Broader fallback: find links that look like record titles
+      const links = Array.from(document.querySelectorAll('a[href*="/full-record/"], a[href*="/wos/woscc/full-record/"]'));
+      const seen = new Set();
+      for (const link of links) {
+        const href = link.getAttribute('href') || '';
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const title = normalize(link.textContent);
+        if (!title || title.length < 5) continue;
+        const card = link.closest('div, article, li') || link.parentElement;
+        const text = normalize(card?.textContent || '');
+        // Try to extract DOI from text
+        const doiMatch = text.match(/\\b(10\\.[0-9]{4,}[^\\s]*)/i);
+        // Try to extract UT accession number
+        const utMatch = href.match(/full-record\\/(WOS:[A-Z0-9]+)/) || text.match(/Accession Number\\s+(WOS:[A-Z0-9]+)/i);
+        // Try to extract year
+        const yearMatch = text.match(/\\b((?:19|20)\\d{2})\\b/);
+        const citedMatch = text.match(/(\\d+)\\s+Citations?\\s+(from|in)/i);
+        results.push({
+          title,
+          authors: '',
+          year: yearMatch?.[1] || '',
+          source: '',
+          cited: citedMatch?.[1] || '0',
+          doi: doiMatch?.[1] || '',
+          ut: utMatch?.[1] || '',
+        });
+      }
+      return results;
+    }
+
+    for (const item of items) {
+      const text = normalize(item.textContent);
+      const titleEl = item.querySelector('a[href*="/full-record/"], h2, h3, .title, [class*="title"]');
+      const title = titleEl ? normalize(titleEl.textContent) : '';
+      if (!title) continue;
+
+      // Extract authors
+      const authorEl = item.querySelector('.author, [class*="author"], .writers');
+      const authors = authorEl ? normalize(authorEl.textContent) : '';
+
+      // Extract source (journal name)
+      const sourceEl = item.querySelector('.source, .journal, [class*="source"], [class*="journal"]');
+      const source = sourceEl ? normalize(sourceEl.textContent) : '';
+
+      // Extract year
+      const yearEl = item.querySelector('.year, .date, [class*="year"]');
+      const year = yearEl ? normalize(yearEl.textContent).match(/\\b((?:19|20)\\d{2})\\b/)?.[1] || '' : '';
+
+      // Extract DOI
+      const doiMatch = text.match(/\\b(10\\.[0-9]{4,}[^\\s]*)/i);
+
+      // Extract cited count
+      const citedMatch = text.match(/(\\d+)\\s+Times\\s+Cited/i) || text.match(/(\\d+)\\s+Citations?/i);
+
+      // Extract UT
+      const link = item.querySelector('a[href*="/full-record/"]');
+      const href = link?.getAttribute('href') || '';
+      const utMatch = href.match(/full-record\\/(WOS:[A-Z0-9]+)/);
+
+      results.push({
+        title,
+        authors,
+        year,
+        source,
+        cited: citedMatch?.[1] || '0',
+        doi: doiMatch?.[1] || '',
+        ut: utMatch?.[1] || '',
+      });
+    }
+    return results;
+  })()`);
+}
 
 cli({
   site: 'webofscience',
   name: 'basic-search',
-  description: 'Search Web of Science via the Basic Search page',
+  description: 'Search Web of Science via the Basic Search page. Requires an active WoS session (institutional login).',
   domain: 'webofscience.clarivate.cn',
   strategy: Strategy.UI,
+  access: 'read',
   browser: true,
   navigateBefore: false,
   args: [
     { name: 'query', positional: true, required: true, help: 'Search query text, e.g. machine learning' },
     {
-      name: 'field',
-      required: false,
-      help: 'Field to search in. Default: topic. Common: topic, title, author, doi, WOS categories',
+      name: 'field', required: false,
+      help: basicSearchFieldHelpText(),
       choices: [
-        'all-fields',
-        'topic',
-        'title',
-        'author',
-        'publication-titles',
-        'year-published',
-        'affiliation',
-        'funding-agency',
-        'publisher',
-        'publication-date',
-        'abstract',
-        'accession-number',
-        'address',
-        'author-identifiers',
-        'author-keywords',
-        'conference',
-        'document-type',
-        'doi',
-        'editor',
-        'grant-number',
-        'group-author',
-        'keyword-plus',
-        'language',
-        'pubmed-id',
-        'web-of-science-categories',
+        'all-fields', 'topic', 'title', 'author', 'publication-titles', 'year-published',
+        'affiliation', 'funding-agency', 'publisher', 'publication-date', 'abstract',
+        'accession-number', 'address', 'author-identifiers', 'author-keywords', 'conference',
+        'document-type', 'doi', 'editor', 'grant-number', 'group-author', 'keyword-plus',
+        'language', 'pubmed-id', 'web-of-science-categories',
       ],
     },
     { name: 'database', required: false, help: 'Database to search. Defaults to woscc.', choices: ['woscc', 'alldb'] },
     { name: 'limit', type: 'int', default: 10, help: 'Max results (max 50)' },
   ],
-  columns: ['rank', 'title', 'authors', 'year', 'source', 'citations', 'doi', 'url'],
+  defaultFormat: 'plain',
+  columns: ['rank', 'title', 'authors', 'source', 'year', 'cited', 'doi', 'url'],
   func: async (page, kwargs) => {
     const query = String(kwargs.query ?? '').trim();
-    if (!query) {
-      throw new ArgumentError('Search query is required');
-    }
+    if (!query) throw new ArgumentError('Search query is required');
 
     const database = normalizeDatabase(kwargs.database);
     const limit = clampLimit(kwargs.limit);
     const field = normalizeBasicSearchField(kwargs.field);
-    const sid = await ensureSearchSessionAtUrl(
-      page,
-      basicSearchUrl(database),
-      query,
-      BASIC_SEARCH_INPUT_SELECTOR,
-      { requireSummaryPage: true },
-    );
-    const payload = buildSearchPayload(query, limit, database, buildBasicSearchRowText(query, field.key));
+    const searchQuery = buildBasicSearchRowText(query, field.key);
 
-    const events = await page.evaluate(`(async () => {
-      const payload = ${JSON.stringify(payload)};
-      const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      return res.json();
-    })()`);
+    await page.goto(basicSearchUrl(database), { settleMs: 4000 });
+    await page.wait(2);
+    await dismissCookieConsent(page);
+    // Use plain query — the textarea accepts natural language, no field prefix needed
+    await fillSearch(page, query, field.key);
 
-    const records = extractRecords(events)
-      .slice(0, limit)
-      .map((record, index) => ({
-        rank: index + 1,
-        title: firstTitle(record, 'item'),
-        authors: formatAuthors(record),
-        year: record.pub_info?.pubyear ?? '',
-        source: firstTitle(record, 'source'),
-        citations: record.citation_related?.counts?.WOSCC ?? 0,
-        doi: record.doi ?? '',
-        url: record.ut ? fullRecordUrl(database, record.ut) : '',
-      }))
-      .filter(record => record.title);
+    const { href, text, qid } = await waitForSummaryPage(page);
+    const didReachResults = qid || /results from Web of Science/i.test(text) || /Search results/i.test(text) || href.includes('/summary/');
 
-    if (!records.length) {
-      throw new EmptyResultError('webofscience basic-search', 'Try a different keyword or verify your Web of Science access in Chrome');
+    if (!didReachResults) {
+      // Try API fallback: use the browser's own session
+      const sid = await page.evaluate(`(() => {
+        try {
+          const entries = performance.getEntriesByType('resource');
+          for (const e of entries) {
+            const s = new URL(e.name).searchParams.get('SID');
+            if (s) return s;
+          }
+        } catch (_) {}
+        return '';
+      })()`);
+
+      if (sid) {
+        const payload = buildSearchPayload(query, limit, database, searchQuery);
+        const events = await page.evaluate(`(async () => {
+          const payload = ${JSON.stringify(payload)};
+          const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
+            method: 'POST', credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          return res.json();
+        })()`);
+        const records = extractRecords(events);
+        if (records.length) {
+          return records.slice(0, limit).map((record, index) => ({
+            rank: index + 1,
+            title: firstTitle(record, 'item'),
+            authors: formatAuthors(record),
+            year: record.pub_info?.pubyear ?? '',
+            source: firstTitle(record, 'source'),
+            cited: String(record.citation_related?.counts?.[toProduct(database)] ?? 0),
+            doi: record.doi ?? '',
+            url: record.ut ? fullRecordUrl(database, record.ut) : '',
+          })).filter(r => r.title);
+        }
+      }
+
+      throw new EmptyResultError(
+        'webofscience basic-search',
+        'Search did not reach results page. This command requires an active WoS institutional login session. Try opening https://webofscience.clarivate.cn in Chrome first.',
+      );
     }
 
-    return records;
+    // DOM scraping from the summary page
+    let rows = (await scrapeRecords(page))
+      .slice(0, limit)
+      .map((item, index) => ({
+        rank: index + 1,
+        title: item.title,
+        authors: item.authors,
+        source: item.source,
+        year: item.year,
+        cited: item.cited,
+        doi: item.doi,
+        url: item.ut ? fullRecordUrl(database, item.ut) : '',
+      }))
+      .filter(r => r.title);
+
+    // If DOM scraping found nothing, try API from within browser context
+    if (!rows.length) {
+      const sid = await page.evaluate(`(() => {
+        try {
+          for (const e of performance.getEntriesByType('resource')) {
+            const s = new URL(e.name).searchParams.get('SID');
+            if (s) return s;
+          }
+        } catch (_) {}
+        return '';
+      })()`);
+
+      if (sid) {
+        const payload = buildSearchPayload(query, limit, database, searchQuery);
+        const events = await page.evaluate(`(async () => {
+          const payload = ${JSON.stringify(payload)};
+          const res = await fetch('/api/wosnx/core/runQuerySearch?SID=' + encodeURIComponent(${JSON.stringify(sid)}), {
+            method: 'POST', credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          return res.json();
+        })()`);
+        const records = extractRecords(events);
+        if (records.length) {
+          rows = records.slice(0, limit).map((record, index) => ({
+            rank: index + 1,
+            title: firstTitle(record, 'item'),
+            authors: formatAuthors(record),
+            year: record.pub_info?.pubyear ?? '',
+            source: firstTitle(record, 'source'),
+            cited: String(record.citation_related?.counts?.[toProduct(database)] ?? 0),
+            doi: record.doi ?? '',
+            url: record.ut ? fullRecordUrl(database, record.ut) : '',
+          })).filter(r => r.title);
+        }
+      }
+    }
+
+    if (!rows.length) {
+      throw new EmptyResultError(
+        'webofscience basic-search',
+        'No results found. Try a different query or verify your Web of Science access in Chrome.',
+      );
+    }
+
+    return rows;
   },
 });

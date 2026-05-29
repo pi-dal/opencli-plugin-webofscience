@@ -47,58 +47,36 @@ describe('webofscience smart-search', () => {
     expect(databaseArg?.help).toContain('Defaults to woscc');
   });
 
-  it('waits for SID to appear before retrying submit, then maps records from runQuerySearch', async () => {
+  it('submits a smart search and maps DOM-scraped records', async () => {
     const cmd = getRegistry().get('webofscience/smart-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: null, href: 'https://webofscience.clarivate.cn/wos/woscc/smart-search' },
-      { sid: 'SID123', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      // dismissCookieConsent: found and dismissed
+      true, false,
+      // fillSmartSearch: returns void
+      undefined,
+      // waitForSummaryPage: returns summary URL
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: 'Showing results from Web of Science', qid: 'test' },
+      // scrapeRecords: returns scraped records
       [
         {
-          key: 'searchInfo',
-          payload: {
-            QueryID: 'QID123',
-            RecordsFound: 685661,
-          },
+          title: 'Avoiding common machine learning pitfalls',
+          authors: 'Lones, Michael A.; Doe, J',
+          year: '2024',
+          source: 'PATTERNS',
+          cited: '64',
+          doi: '10.1016/j.patter.2024.101046',
+          ut: 'WOS:001335131500001',
         },
         {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:001335131500001',
-              doi: '10.1016/j.patter.2024.101046',
-              titles: {
-                item: { en: [{ title: 'Avoiding common machine learning pitfalls' }] },
-                source: { en: [{ title: 'PATTERNS' }] },
-              },
-              names: {
-                author: {
-                  en: [
-                    { first_name: 'Michael A.', last_name: 'Lones' },
-                    { wos_standard: 'Doe, J' },
-                  ],
-                },
-              },
-              pub_info: { pubyear: '2024' },
-              citation_related: { counts: { WOSCC: 64 } },
-            },
-            2: {
-              ut: 'WOS:001527924800002',
-              doi: '',
-              titles: {
-                item: { en: [{ title: 'Another machine learning paper' }] },
-                source: { en: [{ title: 'JOURNAL OF TESTS' }] },
-              },
-              names: {
-                author: {
-                  en: [{ wos_standard: 'Smith, A' }],
-                },
-              },
-              pub_info: { pubyear: '2025' },
-              citation_related: { counts: { WOSCC: 7 } },
-            },
-          },
+          title: 'Another machine learning paper',
+          authors: 'Smith, A',
+          year: '2025',
+          source: 'JOURNAL OF TESTS',
+          cited: '7',
+          doi: '',
+          ut: 'WOS:001527924800002',
         },
       ],
     ]);
@@ -109,8 +87,6 @@ describe('webofscience smart-search', () => {
       'https://webofscience.clarivate.cn/wos/woscc/smart-search',
       { settleMs: 4000 },
     );
-    expect(page.typeText).toHaveBeenCalledWith('#composeQuerySmartSearch', 'machine learning');
-    expect(page.click).toHaveBeenCalledTimes(1);
     expect(result).toEqual([
       {
         rank: 1,
@@ -118,7 +94,7 @@ describe('webofscience smart-search', () => {
         authors: 'Lones, Michael A.; Doe, J',
         year: '2024',
         source: 'PATTERNS',
-        citations: 64,
+        cited: '64',
         doi: '10.1016/j.patter.2024.101046',
         url: 'https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:001335131500001',
       },
@@ -128,71 +104,47 @@ describe('webofscience smart-search', () => {
         authors: 'Smith, A',
         year: '2025',
         source: 'JOURNAL OF TESTS',
-        citations: 7,
+        cited: '7',
         doi: '',
         url: 'https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:001527924800002',
       },
     ]);
   });
 
-  it('throws EmptyResultError when the records payload is empty', async () => {
+  it('throws EmptyResultError when the DOM scrape returns empty and no SID is available', async () => {
     const cmd = getRegistry().get('webofscience/smart-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SID123', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
-      [
-        {
-          key: 'searchInfo',
-          payload: {
-            QueryID: 'QID123',
-            RecordsFound: 0,
-          },
-        },
-        {
-          key: 'records',
-          payload: {},
-        },
-      ],
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '', qid: 'test' },
+      // scrapeRecords returns empty
+      [],
+      // SID extraction returns empty
+      '',
     ]);
 
     await expect(cmd!.func!(page, { query: 'nohits', limit: 5 })).rejects.toThrow(EmptyResultError);
-    expect(page.click).toHaveBeenCalledTimes(1);
   });
 
-  it('uses the ALLDB smart-search route and payload when database=alldb', async () => {
+  it('uses the ALLDB smart-search route and maps DOM-scraped records', async () => {
     const cmd = getRegistry().get('webofscience/smart-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SID999', href: 'https://webofscience.clarivate.cn/wos/alldb/summary/test/relevance/1' },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/alldb/summary/test/relevance/1', text: '', qid: 'test' },
       [
         {
-          key: 'searchInfo',
-          payload: {
-            QueryID: 'QID999',
-            RecordsFound: 1,
-          },
-        },
-        {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:009999999999999',
-              doi: '10.1000/alldb.1',
-              titles: {
-                item: { en: [{ title: 'All databases record' }] },
-                source: { en: [{ title: 'MULTIDATABASE JOURNAL' }] },
-              },
-              names: {
-                author: {
-                  en: [{ wos_standard: 'Zhang, S' }],
-                },
-              },
-              pub_info: { pubyear: '2026' },
-              citation_related: { counts: { WOSCC: 3 } },
-            },
-          },
+          title: 'All databases record',
+          authors: 'Zhang, S',
+          year: '2026',
+          source: 'MULTIDATABASE JOURNAL',
+          cited: '3',
+          doi: '10.1000/alldb.1',
+          ut: 'WOS:009999999999999',
         },
       ],
     ]);
@@ -203,12 +155,6 @@ describe('webofscience smart-search', () => {
       'https://webofscience.clarivate.cn/wos/alldb/smart-search',
       { settleMs: 4000 },
     );
-
-    const runQuerySearchJs = vi.mocked(page.evaluate).mock.calls[1]?.[0];
-    expect(runQuerySearchJs).toContain('/api/wosnx/core/runQuerySearch?SID=');
-    expect(runQuerySearchJs).toContain('"product":"ALLDB"');
-    expect(runQuerySearchJs).toContain('"database":"ALLDB"');
-
     expect(result).toEqual([
       {
         rank: 1,
@@ -216,35 +162,30 @@ describe('webofscience smart-search', () => {
         authors: 'Zhang, S',
         year: '2026',
         source: 'MULTIDATABASE JOURNAL',
-        citations: 3,
+        cited: '3',
         doi: '10.1000/alldb.1',
         url: 'https://webofscience.clarivate.cn/wos/alldb/full-record/WOS:009999999999999',
       },
     ]);
   });
 
-  it('skips null authors when formatting records', async () => {
+  it('maps records with empty optional fields gracefully', async () => {
     const cmd = getRegistry().get('webofscience/smart-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SID321', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '', qid: 'test' },
       [
         {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:001',
-              titles: {
-                item: { en: [{ title: 'Null author test' }] },
-              },
-              names: {
-                author: {
-                  en: [null, { wos_standard: 'Doe, J' }, null],
-                },
-              },
-            },
-          },
+          title: 'Null author test',
+          authors: '',
+          year: '',
+          source: '',
+          cited: '0',
+          doi: '',
+          ut: 'WOS:001',
         },
       ],
     ]);
@@ -255,31 +196,41 @@ describe('webofscience smart-search', () => {
       {
         rank: 1,
         title: 'Null author test',
-        authors: 'Doe, J',
+        authors: '',
         year: '',
         source: '',
-        citations: 0,
+        cited: '0',
         doi: '',
         url: 'https://webofscience.clarivate.cn/wos/woscc/full-record/WOS:001',
       },
     ]);
   });
 
-  it('waits for the summary page when a SID appears before smart-search navigation finishes', async () => {
+  it('falls back to API from within browser context when DOM scrape yields no records', async () => {
     const cmd = getRegistry().get('webofscience/smart-search');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      { sid: 'SIDVERIFY', href: 'https://webofscience.clarivate.cn/wos/woscc/smart-search' },
-      { sid: 'SIDREADY', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '', qid: 'test' },
+      // scrapeRecords returns empty
+      [],
+      // SID extraction
+      'SID-API-FALLBACK',
+      // API fetch via evaluate returns records as JSON (from res.json())
       [
+        {
+          key: 'searchInfo',
+          payload: { QueryID: 'QID123', RecordsFound: 1 },
+        },
         {
           key: 'records',
           payload: {
             1: {
               ut: 'WOS:003',
               titles: {
-                item: { en: [{ title: 'Summary wait test' }] },
+                item: { en: [{ title: 'API fallback smart search' }] },
               },
             },
           },
@@ -287,68 +238,9 @@ describe('webofscience smart-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'wait for summary', limit: 1 }) as Array<{ title: string }>;
+    const result = await cmd!.func!(page, { query: 'api fallback', limit: 1 }) as Array<{ title: string }>;
 
-    expect(result[0]).toMatchObject({ title: 'Summary wait test' });
-    expect(page.click).toHaveBeenCalledTimes(1);
-  });
-
-  it('falls back to Enter when the submit button is unavailable', async () => {
-    const cmd = getRegistry().get('webofscience/smart-search');
-    expect(cmd?.func).toBeTypeOf('function');
-
-    const page = createPageMock([
-      null,
-      { sid: 'SID654', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
-      [
-        {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:002',
-              titles: {
-                item: { en: [{ title: 'Fallback submit test' }] },
-              },
-            },
-          },
-        },
-      ],
-    ]);
-    vi.mocked(page.click).mockRejectedValueOnce(new Error('Element not found'));
-
-    const result = await cmd!.func!(page, { query: 'fallback', limit: 1 }) as Array<{ title: string }>;
-
-    expect(page.pressKey).toHaveBeenCalledWith('Enter');
-    expect(result[0]).toMatchObject({ title: 'Fallback submit test' });
-  });
-
-  it('retries typing when the search input is not ready on first attempt', async () => {
-    const cmd = getRegistry().get('webofscience/smart-search');
-    expect(cmd?.func).toBeTypeOf('function');
-
-    const page = createPageMock([
-      'opencli-search-input',
-      { sid: 'SID765', href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1' },
-      [
-        {
-          key: 'records',
-          payload: {
-            1: {
-              ut: 'WOS:005',
-              titles: {
-                item: { en: [{ title: 'Retry input test' }] },
-              },
-            },
-          },
-        },
-      ],
-    ]);
-    vi.mocked(page.typeText).mockRejectedValueOnce(new Error('Element not found'));
-
-    const result = await cmd!.func!(page, { query: 'retry', limit: 1 }) as Array<{ title: string }>;
-
-    expect(page.typeText).toHaveBeenCalledTimes(2);
-    expect(result[0]).toMatchObject({ title: 'Retry input test' });
+    expect(result[0]).toMatchObject({ title: 'API fallback smart search' });
   });
 
   it('does not keep the legacy search command registered', () => {
