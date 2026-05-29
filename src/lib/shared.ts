@@ -126,6 +126,7 @@ export function buildSearchPayload(
   limit: number,
   database: WosDatabase,
   rowText = `TS=(${query})`,
+  analyzeFacet?: string,
 ): Record<string, unknown> {
   const product = toProduct(database);
 
@@ -151,7 +152,9 @@ export function buildSearchPayload(
       history: true,
       jcr: true,
       sort: 'relevance',
-      analyzes: [
+      analyzes: analyzeFacet
+        ? [analyzeFacet]
+        : [
         'TP.Value.6',
         'REVIEW.Value.6',
         'EARLY ACCESS.Value.6',
@@ -319,7 +322,7 @@ export async function ensureSearchSessionAtUrl(
     );
   }
 
-  return session.sid;
+  return session.sid ?? '';
 }
 
 export function isWosSubmitControl(input: {
@@ -508,10 +511,76 @@ export function extractRecords(events: unknown): WosRecord[] {
   return Object.values(recordsPayload) as WosRecord[];
 }
 
+export type WosAnalyzeFacet =
+  | 'AU' | 'OG' | 'CU' | 'PY' | 'WC' | 'DT' | 'SO' | 'FO'
+  | 'TP' | 'REVIEW' | 'OA' | 'STK';
+
+export const ANALYZE_FACETS: Record<WosAnalyzeFacet, { label: string; key: string }> = {
+  AU: { label: 'Authors', key: 'AU.Value.6' },
+  OG: { label: 'Affiliations', key: 'OG.Value.6' },
+  CU: { label: 'Countries/Regions', key: 'CU.Value.6' },
+  PY: { label: 'Publication Years', key: 'PY.Field_D.6' },
+  WC: { label: 'Web of Science Categories', key: 'WC.Value.6' },
+  DT: { label: 'Document Types', key: 'DT.Value.6' },
+  SO: { label: 'Source Titles', key: 'SO.Value.6' },
+  FO: { label: 'Funding Agencies', key: 'FO.Value.6' },
+  TP: { label: 'Total Publications', key: 'TP.Value.6' },
+  REVIEW: { label: 'Reviews', key: 'REVIEW.Value.6' },
+  OA: { label: 'Open Access', key: 'OA.Value.6' },
+  STK: { label: 'Citation Topics', key: 'STK.Value.10' },
+};
+
+export function extractAnalyzeData(events: unknown): Record<string, Array<{ value: string; count: number }>> | null {
+  if (!Array.isArray(events)) return null;
+  const eventList = events as WosEvent[];
+  const analyzeEvents = eventList.filter(event => event?.key === 'analyze');
+  if (!analyzeEvents.length) return null;
+
+  const result: Record<string, Array<{ value: string; count: number }>> = {};
+  for (const event of analyzeEvents) {
+    const payload = event.payload;
+    if (!payload || typeof payload !== 'object') continue;
+    // payload can be keyed by facet code (AU, PY, etc.) with array of {value, count} items
+    for (const [facet, data] of Object.entries(payload)) {
+      if (Array.isArray(data)) {
+        result[facet] = data.map((item: any) => ({
+          value: String(item.value ?? item.label ?? ''),
+          count: Number(item.count ?? item.recordCount ?? 0),
+        }));
+      }
+    }
+  }
+  return Object.keys(result).length ? result : null;
+}
+
 export function extractQueryId(events: unknown): string {
   if (!Array.isArray(events)) return '';
   const eventList = events as WosEvent[];
   return String(eventList.find(event => event?.key === 'searchInfo')?.payload?.QueryID ?? '');
+}
+
+export async function dismissCookieConsent(
+  page: { evaluate: (js: string) => Promise<any>; wait: (seconds: number) => Promise<any> },
+): Promise<void> {
+  // Poll for the cookie consent dialog and dismiss it
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const clicked = await page.evaluate(`(() => {
+      const btn = document.querySelector('#accept-recommended-btn-handler')
+        || document.querySelector('#close-pc-btn-handler')
+        || document.querySelector('.onetrust-close-btn-handler');
+      if (btn) { btn.click(); return true; }
+      return false;
+    })()`);
+    if (clicked) {
+      await page.wait(1);
+      // Check if dialog is gone
+      const stillThere = await page.evaluate(`(() => {
+        return !!document.querySelector('#onetrust-consent-sdk');
+      })()`);
+      if (!stillThere) return;
+    }
+    await page.wait(1);
+  }
 }
 
 export function parseRecordIdentifier(input: string): RecordIdentifier | null {
