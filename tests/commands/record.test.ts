@@ -34,6 +34,8 @@ function createPageMock(evaluateResults: any[]): IPage {
     getInterceptedRequests: vi.fn().mockResolvedValue([]),
     getCookies: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(''),
+    fetchJson: vi.fn().mockResolvedValue(undefined),
+    fillText: vi.fn().mockResolvedValue({ filled: true, verified: true, expected: '', actual: '', length: 0, matches_n: 1, match_level: 'exact' }),
   };
 }
 
@@ -341,7 +343,7 @@ Journal information`;
       },
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:001335131500001', database: 'alldb' });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001335131500001', database: 'alldb' });
 
     expect(page.goto).toHaveBeenNthCalledWith(1,
       'https://webofscience.clarivate.cn/wos/alldb/basic-search',
@@ -456,7 +458,7 @@ Journal Impact Factor`,
       },
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:RETRY1' }) as Array<{ field: string; value: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:RETRY1' }) as Array<{ field: string; value: string }>;
 
     expect(page.goto).toHaveBeenNthCalledWith(
       2,
@@ -512,7 +514,7 @@ Journal Impact Factor`,
       ],
     ]);
 
-    const result = await cmd!.func!(page, {
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, {
       id: 'https://webofscience.clarivate.cn/wos/alldb/full-record/WOS:009999999999999',
     }) as Array<{ field: string; value: string }>;
 
@@ -529,7 +531,7 @@ Journal Impact Factor`,
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([]);
-    await expect(cmd!.func!(page, { id: 'not-a-record' })).rejects.toThrow(ArgumentError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'not-a-record' })).rejects.toThrow(ArgumentError);
   });
 
   it('throws EmptyResultError when the exact record cannot be found', async () => {
@@ -553,7 +555,7 @@ Journal Impact Factor`,
       ],
     ]);
 
-    await expect(cmd!.func!(page, { id: 'WOS:001404' })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001404' })).rejects.toThrow(EmptyResultError);
   });
 
   it('falls back to Enter when the submit button is unavailable', async () => {
@@ -597,7 +599,7 @@ Journal Impact Factor`,
     ]);
     vi.mocked(page.click).mockRejectedValueOnce(new Error('Element not found'));
 
-    const result = await cmd!.func!(page, { id: 'WOS:003' });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:003' });
 
     expect(page.pressKey).toHaveBeenCalledWith('Enter');
     expect(result).toBeTruthy();
@@ -645,7 +647,7 @@ Journal Impact Factor`,
     ]);
     vi.mocked(page.evaluate).mockRejectedValueOnce(new Error('Unexpected token <'));
 
-    const result = await cmd!.func!(page, { id: 'WOS:004' });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:004' });
 
     expect(result).toEqual([
       { field: 'title', value: 'Fallback summary record' },
@@ -740,7 +742,7 @@ Journal Impact Factor`,
       },
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:001335131500001' }) as Array<{ field: string; value: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001335131500001' }) as Array<{ field: string; value: string }>;
 
     expect(result).toContainEqual({ field: 'author_keywords', value: 'machine learning; best practices' });
     expect(result).toContainEqual({ field: 'keywords_plus', value: 'NEURAL NETWORKS; SELECTION' });
@@ -802,7 +804,7 @@ WOS:001411195100001`,
         fullTextLinks: [],
       });
 
-    const result = await cmd!.func!(page, { id: 'WOS:001411195100001' }) as Array<{ field: string; value: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001411195100001' }) as Array<{ field: string; value: string }>;
 
     expect(page.goto).toHaveBeenNthCalledWith(
       1,
@@ -912,7 +914,7 @@ WOS:001411195100001`,
       },
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:001411195100001' }) as Array<{ field: string; value: string }>;
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'WOS:001411195100001' }) as Array<{ field: string; value: string }>;
 
     expect(result).toContainEqual({
       field: 'authors',

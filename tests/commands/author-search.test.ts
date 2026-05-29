@@ -34,6 +34,8 @@ function createPageMock(evaluateResults: any[]): IPage {
     getInterceptedRequests: vi.fn().mockResolvedValue([]),
     getCookies: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(''),
+    fetchJson: vi.fn().mockResolvedValue(undefined),
+    fillText: vi.fn().mockResolvedValue({ filled: true, verified: true, expected: '', actual: '', length: 0, matches_n: 1, match_level: 'exact' }),
   };
 }
 
@@ -105,7 +107,7 @@ describe('webofscience author-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'jane doe', limit: 1 });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'jane doe', limit: 1 });
 
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/author/author-search',
@@ -160,7 +162,7 @@ describe('webofscience author-search', () => {
       ],
     ]);
 
-    await cmd!.func!(page, {
+    await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, {
       query: 'Yann LeCun',
       'claimed-status': 'claimed',
       affiliation: 'Meta',
@@ -207,7 +209,7 @@ describe('webofscience author-search', () => {
       [],
     ]);
 
-    await expect(cmd!.func!(page, { query: 'Yann LeCun', limit: 1 })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'Yann LeCun', limit: 1 })).rejects.toThrow(EmptyResultError);
 
     const scrapeJs = vi.mocked(page.evaluate).mock.calls[2]?.[0];
     expect(scrapeJs).not.toContain('const location =');
@@ -238,7 +240,7 @@ describe('webofscience author-search', () => {
       ],
     ]);
 
-    const result = await cmd!.func!(page, { query: 'Yann LeCun', limit: 1 });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'Yann LeCun', limit: 1 });
 
     expect(result).toEqual([
       expect.objectContaining({
@@ -264,6 +266,6 @@ describe('webofscience author-search', () => {
       },
       [],
     ]);
-    await expect(cmd!.func!(page, { query: 'nobody' })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { query: 'nobody' })).rejects.toThrow(EmptyResultError);
   });
 });

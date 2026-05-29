@@ -33,6 +33,8 @@ function createPageMock(evaluateResults: any[]): IPage {
     getInterceptedRequests: vi.fn().mockResolvedValue([]),
     getCookies: vi.fn().mockResolvedValue([]),
     screenshot: vi.fn().mockResolvedValue(''),
+    fetchJson: vi.fn().mockResolvedValue(undefined),
+    fillText: vi.fn().mockResolvedValue({ filled: true, verified: true, expected: '', actual: '', length: 0, matches_n: 1, match_level: 'exact' }),
   };
 }
 
@@ -73,7 +75,7 @@ describe('webofscience author-record', () => {
       },
     ]);
 
-    const result = await cmd!.func!(page, { id: '89895674' });
+    const result = await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: '89895674' });
 
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/author/record/89895674',
@@ -114,7 +116,7 @@ describe('webofscience author-record', () => {
       { name: 'Yann LeCun', researcherId: 'PQF-7882-2026', metricsText: '', links: [] },
     ]);
 
-    await cmd!.func!(page, { id: 'https://webofscience.clarivate.cn/wos/author/record/89895674' });
+    await (cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'https://webofscience.clarivate.cn/wos/author/record/89895674' });
     expect(page.goto).toHaveBeenCalledWith(
       'https://webofscience.clarivate.cn/wos/author/record/89895674',
       { settleMs: 5000 },
@@ -126,7 +128,7 @@ describe('webofscience author-record', () => {
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([]);
-    await expect(cmd!.func!(page, { id: 'not-a-record' })).rejects.toThrow(ArgumentError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: 'not-a-record' })).rejects.toThrow(ArgumentError);
   });
 
   it('throws EmptyResultError when the author record page contains no usable profile data', async () => {
@@ -137,6 +139,6 @@ describe('webofscience author-record', () => {
       { name: '', researcherId: '', metricsText: '', links: [] },
     ]);
 
-    await expect(cmd!.func!(page, { id: '89895674' })).rejects.toThrow(EmptyResultError);
+    await expect((cmd!.func as (page: IPage, kwargs: Record<string, any>) => Promise<any>)(page, { id: '89895674' })).rejects.toThrow(EmptyResultError);
   });
 });
