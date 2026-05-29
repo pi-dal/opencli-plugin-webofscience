@@ -232,6 +232,7 @@ cli({
   description: 'Fetch a Web of Science researcher author record',
   domain: 'webofscience.clarivate.cn',
   strategy: Strategy.UI,
+  access: 'read',
   browser: true,
   navigateBefore: false,
   args: [

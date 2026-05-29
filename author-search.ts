@@ -397,6 +397,7 @@ cli({
   description: 'Search Web of Science researcher profiles',
   domain: 'webofscience.clarivate.cn',
   strategy: Strategy.UI,
+  access: 'read',
   browser: true,
   navigateBefore: false,
   args: [
