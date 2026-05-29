@@ -10,6 +10,7 @@ describe('opencli-plugin-webofscience commands', () => {
     await import('../record.ts');
     await import('../references.ts');
     await import('../citing-articles.ts');
+    await import('../full-text.ts');
 
     for (const name of [
       'smart-search',
@@ -19,6 +20,7 @@ describe('opencli-plugin-webofscience commands', () => {
       'record',
       'references',
       'citing-articles',
+      'full-text',
     ]) {
       expect(getRegistry().has(`webofscience/${name}`)).toBe(true);
     }

@@ -11,6 +11,7 @@ const commandEntries = [
   ['citing-articles.ts', 'citing-articles.js'],
   ['analyze-results.ts', 'analyze-results.js'],
   ['citation-report.ts', 'citation-report.js'],
+  ['full-text.ts', 'full-text.js'],
 ]
 
 for (const [input, output] of commandEntries) {
