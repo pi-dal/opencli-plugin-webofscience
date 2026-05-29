@@ -8,7 +8,9 @@ const commandEntries = [
   ['author-record.ts', 'author-record.js'],
   ['record.ts', 'record.js'],
   ['references.ts', 'references.js'],
-  ['citing-articles.ts', 'citing-articles.js']
+  ['citing-articles.ts', 'citing-articles.js'],
+  ['analyze-results.ts', 'analyze-results.js'],
+  ['citation-report.ts', 'citation-report.js'],
 ]
 
 for (const [input, output] of commandEntries) {
