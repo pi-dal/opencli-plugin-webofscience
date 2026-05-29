@@ -46,7 +46,7 @@ describe('webofscience references', () => {
     expect(idArg?.help).toContain('WOS:');
     expect(idArg?.help).toContain('DOI');
     expect(idArg?.help).toContain('full-record URL');
-    expect(databaseArg?.help).toContain('Defaults to the database in the URL');
+    expect(databaseArg?.help).toContain('Defaults to woscc');
   });
 
   it('parses summary stream payloads that arrive as a JSON array', () => {
@@ -59,37 +59,44 @@ describe('webofscience references', () => {
     ]);
   });
 
-  it('loads a cited references summary via the records stream endpoint', async () => {
+  it('searches for the record, navigates to cited references summary, and maps DOM-scraped records', async () => {
     const cmd = getRegistry().get('webofscience/references');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      true,
-      {
-        streamText: [
-          '{"id":0,"key":"searchInfo","payload":{"QueryID":"QIDREFS","RecordsFound":71}}',
-          '{"api":"runQueryGetRecordsStream","id":1,"key":"records","payload":{"1":{"ut":"123456789","doi":"10.1000/ref.1","titles":{"source":{"en":[{"title":"SCIENCE"}]}},"names":{"author":{"en":[{"wos_standard":"Doe, J"}]}},"pub_info":{"pubyear":"2021"},"citation_related":{"counts":{"WOSCC":7}}}}}',
-        ].join('\n'),
-        debug: {},
-      },
+      // dismissCookieConsent: found and dismissed
+      true, false,
+      // fillAndSubmit: returns void
+      undefined,
+      // waitForSummaryUrl: returns summary URL
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: 'Showing results', qid: 'test' },
+      // UT extraction from first result link
+      'WOS:001335131500001',
+      // DOM scraping on cited-references summary page: returns references
+      [
+        {
+          title: 'SCIENCE',
+          authors: 'Doe, J',
+          year: '2021',
+          source: 'SCIENCE',
+          cited: '7',
+          ut: '123456789',
+        },
+      ],
     ]);
 
     const result = await cmd!.func!(page, { id: 'https://webofscience.clarivate.cn/wos/alldb/full-record/WOS:001335131500001', limit: 1 });
 
-    expect(page.goto).toHaveBeenCalledWith(
-      'https://webofscience.clarivate.cn/wos/alldb/full-record/WOS:001335131500001',
-      { settleMs: 5000 },
+    expect(page.goto).toHaveBeenNthCalledWith(
+      1,
+      'https://webofscience.clarivate.cn/wos/alldb/smart-search',
+      { settleMs: 4000 },
     );
-
-    const navigateJs = vi.mocked(page.evaluate).mock.calls[0]?.[0];
-    expect(navigateJs).toContain('location.href');
-    expect(navigateJs).toContain('cited-references-summary/WOS:001335131500001');
-
-    const fetchJs = vi.mocked(page.evaluate).mock.calls[1]?.[0];
-    expect(fetchJs).toContain(`localStorage.getItem('wos_search_' + qid)`);
-    expect(fetchJs).toContain(`searchState?.mode || "cited_references"`);
-    expect(fetchJs).toContain(`/api/wosnx/core/runQueryGetRecordsStream?SID=`);
-
+    expect(page.goto).toHaveBeenNthCalledWith(
+      2,
+      'https://webofscience.clarivate.cn/wos/alldb/cited-references-summary/WOS:001335131500001?from=alldb&type=colluid',
+      { settleMs: 8000 },
+    );
     expect(result).toEqual([
       {
         rank: 1,
@@ -97,78 +104,73 @@ describe('webofscience references', () => {
         authors: 'Doe, J',
         year: '2021',
         source: 'SCIENCE',
-        citations: 7,
-        doi: '10.1000/ref.1',
-        url: '',
+        cited: '7',
+        url: 'https://webofscience.clarivate.cn/wos/alldb/full-record/123456789',
       },
     ]);
   });
 
-  it('throws EmptyResultError when the cited references summary has no records', async () => {
+  it('throws EmptyResultError when no UT can be extracted after search', async () => {
     const cmd = getRegistry().get('webofscience/references');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      true,
-      { streamText: '', debug: {} },
-      { streamText: '', debug: {} },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '', qid: 'test' },
+      // UT extraction fails
+      '',
     ]);
 
     await expect(cmd!.func!(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
   });
 
-  it('retries the cited references stream after a passive verification response', async () => {
+  it('throws EmptyResultError when the cited references summary has no records and no SID fallback', async () => {
     const cmd = getRegistry().get('webofscience/references');
     expect(cmd?.func).toBeTypeOf('function');
 
     const page = createPageMock([
-      true,
-      {
-        streamText: JSON.stringify([
-          { key: 'error', payload: ['Server.passiveVerificationRequired'] },
-        ]),
-        debug: {},
-      },
-      {
-        streamText: JSON.stringify([
-          { key: 'searchInfo', payload: { QueryID: 'QIDREFS', RecordsFound: 1 } },
-          {
-            key: 'records',
-            payload: {
-              1: {
-                ut: '123456789',
-                doi: '10.1000/ref.retry',
-                titles: {
-                  source: { en: [{ title: 'RETRY JOURNAL' }] },
-                },
-                names: {
-                  author: {
-                    en: [{ wos_standard: 'Retry, A' }],
-                  },
-                },
-                pub_info: { pubyear: '2024' },
-                citation_related: { counts: { WOSCC: 2 } },
-              },
-            },
-          },
-        ]),
-        debug: {},
-      },
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '', qid: 'test' },
+      'WOS:001335131500001',
+      // DOM scrape returns empty
+      [],
+      // SID extraction returns empty
+      '',
     ]);
 
-    const result = await cmd!.func!(page, { id: 'WOS:001335131500001', limit: 1 });
+    await expect(cmd!.func!(page, { id: 'WOS:001335131500001' })).rejects.toThrow(EmptyResultError);
+  });
 
-    expect(result).toEqual([
-      {
-        rank: 1,
-        title: 'RETRY JOURNAL',
-        authors: 'Retry, A',
-        year: '2024',
-        source: 'RETRY JOURNAL',
-        citations: 2,
-        doi: '10.1000/ref.retry',
-        url: '',
-      },
+  it('falls back to API from within browser context when DOM scrape yields no records', async () => {
+    const cmd = getRegistry().get('webofscience/references');
+    expect(cmd?.func).toBeTypeOf('function');
+
+    const page = createPageMock([
+      true, false,
+      undefined,
+      { href: 'https://webofscience.clarivate.cn/wos/woscc/summary/test/relevance/1', text: '', qid: 'test' },
+      'WOS:001335131500001',
+      // DOM scrape returns empty
+      [],
+      // SID extraction
+      'SID-REFS-API',
+      // API fetch returns mapped records array
+      [
+        {
+          title: 'REFERENCE ONE',
+          authors: 'Ref, A',
+          year: '2024',
+          source: 'REF JOURNAL',
+          cited: '2',
+          ut: 'WOS:999',
+        },
+      ],
     ]);
+
+    const result = await cmd!.func!(page, { id: 'WOS:001335131500001', limit: 1 }) as Array<{ title?: string }>;
+
+    expect(result[0]).toMatchObject({ title: 'REFERENCE ONE' });
   });
 });
